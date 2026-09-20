@@ -36,14 +36,18 @@ from pipeline.calendar_gate import ET, stale_symbols, when_to_run
 from pipeline.compute import build_windows, compute_metrics, compute_strength
 from pipeline.config import load_config
 from pipeline.fetch import fetch_window, restrict_to_sessions
+from pipeline.fetch_events import distances_for, fetch_symbol_events, should_refresh
 from pipeline.sessions import lookback_window
 from pipeline.store import (
     connect,
     data_transaction,
+    delete_events_window,
     diff_prices,
     finish_run,
+    insert_events,
     replace_strength,
     start_run,
+    touch_fetch_state,
     upsert_metrics,
     upsert_prices,
 )
@@ -111,6 +115,110 @@ def _already_done(conn: psycopg.Connection[Any], session_date: date) -> bool:
             (session_date,),
         )
         return cur.fetchone() is not None
+
+
+def _refresh_events(
+    conn: psycopg.Connection[Any],
+    cfg: Config,
+    symbols: list[str],
+    session_date: date,
+    budget: RequestBudget,
+) -> tuple[dict[str, Any], bool]:
+    """按 §3.5(4) 的节奏刷新事件，并把库里已有的事件算成四个距离。
+
+    **抓取失败不记 partial。** ``partial`` 是 exit 1 且不写 ``ok`` 行，
+    于是 §7.1 的条件重试「本 session 已有 ok 就跳过」不会跳过 ——
+    夏令时那四跑会全部执行完整管道，而 18:40 那跑若撞上限流降级到 Stooq，
+    **好数据会被更粗的源静默覆盖**。一个可选的装饰性指标，
+    就这样获得了静默污染核心价格序列的能力。
+    """
+    import yfinance as yf
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select symbol, min(event_date) from symbol_events "
+            "where event_date >= %s group by symbol",
+            (session_date,),
+        )
+        nearest = dict(cur.fetchall())
+        cur.execute("select symbol, last_event_fetch_at::date from private.fetch_state")
+        last_fetch = dict(cur.fetchall())
+
+    ok = True
+    fetched: list[str] = []
+    for sym in symbols:
+        if not should_refresh(
+            today=session_date,
+            is_trading_day=True,
+            last_fetch_at=last_fetch.get(sym),
+            nearest_event=nearest.get(sym),
+            refresh_weekday=cfg.app.events_refresh_weekday,
+            within_days=cfg.app.events_refresh_within_days,
+        ):
+            continue
+        ticker = yf.Ticker(sym)
+
+        def _cal(_s: str, t: Any = ticker) -> Any:
+            return t.calendar
+
+        def _earn(_s: str, t: Any = ticker) -> Any:
+            return t.earnings_dates
+
+        def _divs(_s: str, t: Any = ticker) -> Any:
+            return t.dividends
+
+        outcome = fetch_symbol_events(
+            sym,
+            today=session_date,
+            sessions_start=cfg.app.sessions_start_date,
+            budget=budget,
+            calendar_fn=_cal,
+            earnings_dates_fn=_earn,
+            dividends_fn=_divs,
+        )
+        if not outcome.ok:
+            ok = False
+            continue
+        # 删+插在**同一个事务**里，且仅当抓取成功（§3.5(1)）。
+        with data_transaction(conn):
+            for etype, start in outcome.coverage.items():
+                delete_events_window(conn, sym, etype, start)
+            insert_events(
+                conn,
+                [
+                    {
+                        "symbol": e.symbol,
+                        "event_type": e.event_type,
+                        "event_date": e.event_date,
+                        "is_estimated": e.is_estimated,
+                        "amount": e.amount,
+                        "source": e.source,
+                    }
+                    for e in outcome.events
+                ],
+            )
+            touch_fetch_state(conn, [sym])
+        fetched.append(sym)
+
+    # 距离一律**从库里**算 —— 这一跑没刷新的标的也要有值。
+    from pipeline.fetch_events import SymbolEvent
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select symbol, event_type, event_date, is_estimated from symbol_events "
+            "where symbol = any(%s)",
+            (symbols,),
+        )
+        rows = cur.fetchall()
+    by_symbol: dict[str, list[SymbolEvent]] = {}
+    for sym, etype, edate, est in rows:
+        by_symbol.setdefault(sym, []).append(
+            SymbolEvent(symbol=sym, event_type=etype, event_date=edate, is_estimated=est)
+        )
+    return (
+        {s: distances_for(evs, session_date) for s, evs in by_symbol.items()},
+        ok,
+    )
 
 
 def run_once(
@@ -187,10 +295,18 @@ def run_once(
         report.note(f"bar 落后：{', '.join(lagging)}")
         prices = prices[~prices["symbol"].isin(lagging)].reset_index(drop=True)
 
+    # 4b. 事件（§3.5）。**失败不得惊动主管道** —— 见下面的 ok_events_stale。
+    events_by_symbol, events_ok = _refresh_events(conn, cfg, symbols, session.date, budget)
+    if not events_ok and report.status == "ok":
+        report.status = "ok_events_stale"
+        report.note("事件抓取失败，核心指标照常写入（§3.5(4)）")
+
     # 5. 计算（三层一起，§3.0 规则 2）
     ordinal_by_date = {s.date: s.ordinal for s in sessions}
     windows = build_windows(prices, ordinal_by_date)
-    metrics = compute_metrics(cfg, windows, latest_date=session.date)
+    metrics = compute_metrics(
+        cfg, windows, event_distances=events_by_symbol, latest_date=session.date
+    )
     pool = {s.symbol: s.type for s in cfg.universe.symbols}
     strength = compute_strength(cfg, metrics, day=session.date, pool=pool)
 
