@@ -78,8 +78,16 @@ PRICE_COLUMNS = (
     "source",
 )
 
-#: §7.2 闸门 4：日间跳变上限。超过它且当天没有公司行动 → 该标的 partial。
+#: §7.2 闸门 4：日间跳变上限。超过它且当天没有公司行动 → 该标的存疑。
 _MAX_DAILY_MOVE = 0.5
+
+#: 跨源收盘价的容差。两个源对同一天的复权价差超过它 = 其中一个是脏的。
+#:
+#: 取 2%：两家供应商对同一天的复权价本该几乎一致，剩下的差异来自复权链
+#: 起点的细微口径不同（Stooq 的价格已复权，而它的基准未必与 Yahoo 相同）。
+#: 2% 足以不把那种系统性偏移当成脏数据，同时仍能抓住「一个 0.01 的坏收盘」
+#: —— 后者的相对差是 99%，不是 2%。
+_CROSS_SOURCE_TOLERANCE = 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +368,15 @@ class FetchOutcome:
     degraded: tuple[str, ...] = ()
     missing: tuple[str, ...] = ()
     issues: tuple[SanityIssue, ...] = ()
+    #: 闸门 4 判定为**不可信**、已从 ``frame`` 里剔除的标的。
+    #:
+    #: §7.2 闸门 4 的最后一句是「违反 → 该标的 partial，**不写毒数据**」。
+    #: 只记 partial 而照写不误，等于把那句话读成了一半：一个 MU 的 0.01 坏收盘
+    #: 会照样进库、照样参与排名，并且因为落进 126 日窗口，
+    #: **在上游修正之后仍继续污染统计半年**。
+    rejected: tuple[str, ...] = ()
+    #: 跨源比对的最大相对差（§7.2 闸门 4 末条），按标的。
+    cross_source_max_diff: dict[str, float] = field(default_factory=dict)
 
     @property
     def symbols(self) -> tuple[str, ...]:
@@ -433,12 +450,50 @@ def fetch_window(
         else _empty_frame()
     )
     issues = check_sanity(frame, corporate_action_dates=corporate_action_dates)
+
+    # ── 闸门 4 的后半句：拿备源做第二意见，再决定写不写 ──────────────────
+    #
+    # §7.2 闸门 4 末条要求「两个源都有该 bar 时，做一次跨源收盘价一致性比对」。
+    # 那条在纯降级路径上**永远跑不到** —— 降级只在 yfinance 对该标的
+    # 一行都没给时才发生，于是两个源从不共存。
+    #
+    # 真正「两个源都值得有」的时刻恰恰是这里：主源给了数据但它看起来不对。
+    #   · 备源**同意** → 那是一次真实的剧烈波动（财报、崩盘），照写；
+    #   · 备源**不同意**（或拿不到）→ 主源脏了，**剔除该标的，不写毒数据**。
+    suspicious = sorted({i.symbol for i in issues})
+    rejected: list[str] = []
+    diffs: dict[str, float] = {}
+    for sym in suspicious:
+        try:
+            second = budget.request(
+                lambda s=sym: stq(s, start, end),  # type: ignore[misc,operator]
+                what=f"Stooq 第二意见 {sym}",
+            )
+        except (BudgetExceeded, RetryAfterTooLong):
+            raise
+        except Exception:  # 拿不到第二意见 → 保守剔除
+            rejected.append(sym)
+            continue
+        gap = cross_source_gap(frame[frame["symbol"] == sym], second)
+        worst = float(gap["rel_diff"].max()) if not gap.empty else float("nan")
+        diffs[sym] = worst
+        # NaN 也走这里 —— **比不出来就不信**。
+        if not (worst <= _CROSS_SOURCE_TOLERANCE):
+            rejected.append(sym)
+
+    if rejected:
+        frame = frame[~frame["symbol"].isin(rejected)].reset_index(drop=True)
+        for sym in rejected:
+            per_source.pop(sym, None)
+
     return FetchOutcome(
         frame=frame,
         per_symbol_source=per_source,
         degraded=tuple(degraded),
         missing=tuple(missing),
         issues=tuple(issues),
+        rejected=tuple(rejected),
+        cross_source_max_diff=diffs,
     )
 
 

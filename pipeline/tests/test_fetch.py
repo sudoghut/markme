@@ -248,6 +248,76 @@ class TestWholeWindowDegradation:
         assert b.used == 1
 
 
+class TestGateFourActuallyRejects:
+    """§7.2 闸门 4 的**最后一句**：「违反 → 该标的 partial，**不写毒数据**」。
+
+    只记 partial 而照写不误，等于把那句话读成了一半 —— 而 codex 指出的
+    突变正是「把剔除逻辑删掉，全部测试照样通过」，因为此前的测试只验
+    *检测*，不验*那个标的没进 T2*。
+    """
+
+    def _raw_with_bad_tick(self) -> pd.DataFrame:
+        # 第三根是 0.01 的坏收盘 —— 会给出 mom_20 ≈ -99.9%、RSI 钉在 0，
+        # 并且因为落进 126 日窗口，在上游修正之后仍继续污染统计半年。
+        return _yf_raw({"AAPL": [100.0] * 5, "MU": [100.0, 101.0, 0.01, 103.0, 104.0]})
+
+    def _stooq(self, closes: list[float]) -> str:
+        head = "Date,Open,High,Low,Close,Volume\n"
+        return head + "".join(
+            f"{d},{c},{c},{c},{c},1000\n" for d, c in zip(DAYS, closes, strict=True)
+        )
+
+    def _run(self, stooq_closes: list[float] | None) -> Any:
+        raw = self._raw_with_bad_tick()
+
+        def stooq(sym: str, a: date, b: date) -> pd.DataFrame:
+            if stooq_closes is None:
+                raise RuntimeError("Stooq 也拿不到")
+            return stooq_frame(sym, a, b, fetch_csv=lambda *x: self._stooq(stooq_closes))
+
+        return fetch_window(
+            ["AAPL", "MU"],
+            START,
+            END,
+            _budget(),
+            yf_frame=lambda s, a, b: yfinance_frame(s, a, b, download=lambda *x, **k: raw),
+            stooq=stooq,
+        )
+
+    def test_a_dirty_symbol_is_removed_from_the_frame(self) -> None:
+        """备源不同意 → 主源脏了 → **剔除**，而不只是记一笔。"""
+        out = self._run([100.0, 101.0, 102.0, 103.0, 104.0])  # 备源说第三根是 102
+        assert out.rejected == ("MU",)
+        assert set(out.frame["symbol"]) == {"AAPL"}, "毒数据不能进 T2"
+        assert "MU" not in out.per_symbol_source
+
+    def test_a_clean_symbol_is_untouched(self) -> None:
+        out = self._run([100.0, 101.0, 102.0, 103.0, 104.0])
+        assert (out.frame["symbol"] == "AAPL").all()
+        assert len(out.frame) == len(DAYS)
+
+    def test_a_real_crash_confirmed_by_the_second_source_is_kept(self) -> None:
+        """**两个源都说它跌了 99%，那它就是真跌了。**
+
+        这正是 §7.2 闸门 4 末条那个比对存在的理由：
+        没有第二意见时，只能在「误杀真实暴跌」和「放进毒数据」之间二选一。
+        """
+        out = self._run([100.0, 101.0, 0.01, 103.0, 104.0])  # 备源也说 0.01
+        assert out.rejected == ()
+        assert set(out.frame["symbol"]) == {"AAPL", "MU"}
+        assert out.issues, "仍然要报出来 —— 只是不再剔除"
+
+    def test_no_second_opinion_means_reject(self) -> None:
+        """**比不出来就不信。** 拿不到第二意见时保守剔除。"""
+        out = self._run(None)
+        assert out.rejected == ("MU",)
+        assert set(out.frame["symbol"]) == {"AAPL"}
+
+    def test_the_cross_source_diff_is_reported(self) -> None:
+        out = self._run([100.0, 101.0, 102.0, 103.0, 104.0])
+        assert out.cross_source_max_diff["MU"] > 0.9, "0.01 对 102 的相对差接近 1"
+
+
 class TestSanityGate:
     def _frame(self, source: str, closes: list[float], **over: Any) -> pd.DataFrame:
         n = len(closes)

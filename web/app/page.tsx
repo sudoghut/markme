@@ -113,6 +113,19 @@ export default async function Dashboard() {
   );
 }
 
+/**
+ * **交易所当地日期，不是 UTC 日期。**
+ *
+ * 用 UTC 时，从 UTC 午夜到下一个美股 session 之间的那几个小时里，
+ * 「今天」会提前跨到下一天，于是查询把一个**预填的未来 session** 也算进来，
+ * 顶部黄条就会谎报「已落后 2 个交易日」—— 一条在每天固定时段自动出现、
+ * 而数据其实完全正常的告警。
+ */
 function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }

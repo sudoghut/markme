@@ -374,6 +374,15 @@ def run_once(
     if outcome.issues:
         report.status = "partial"
         report.note("脏数据：" + "；".join(str(i) for i in outcome.issues[:5]))
+    if outcome.rejected:
+        # §7.2 闸门 4 的最后一句：「违反 → 该标的 partial，**不写毒数据**」。
+        # fetch_window 已经把它们从 frame 里剔除了；这里只是把原因记下来。
+        report.status = "partial"
+        diffs = ", ".join(
+            f"{s}={outcome.cross_source_max_diff.get(s, float('nan')):.1%}"
+            for s in outcome.rejected
+        )
+        report.note(f"跨源比对未通过、已剔除：{diffs}")
 
     prices = restrict_to_sessions(outcome.frame, sessions)
     if prices.empty:
@@ -422,7 +431,9 @@ def run_once(
     # 不写的话，昨天那一行会成为这个标的的最新行，而它带着昨天的
     # alpha/beta **和八个事件列**；于是 §3.5(3) 的「历史行事件列必须全为 NULL」
     # 那条不变式会在任何一个标的落后的当天变红。
-    metrics += _null_rows(lagging, session.date, cfg)
+    # 落后的与被剔除的，都要有一行**全 NULL** 的最新行 ——
+    # 否则昨天那行会成为它们的最新行，带着昨天的 alpha/beta 与八个事件列。
+    metrics += _null_rows(sorted({*lagging, *outcome.rejected}), session.date, cfg)
     pool = {s.symbol: s.type for s in cfg.universe.symbols}
     strength = compute_strength(cfg, metrics, day=session.date, pool=pool)
 
