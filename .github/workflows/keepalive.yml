@@ -1,0 +1,41 @@
+name: keepalive
+
+# 两件事（§7.4 / §8.6 / §12 #9 第 3 条）：
+#
+# 1. 极轻的探活，防 Supabase free tier 在长假期把项目暂停。
+# 2. **跑一遍 invariants.sql。** 这条比探活重要得多：
+#    那些断言断的是**线上数据库状态**，不是代码，而 ci.yml 的触发是
+#    push + PR —— §7.2.1 已经指出这个项目的稳态是「跑得很好、没人再推代码」。
+#    于是「有人在 SQL Editor 里关掉了 RLS」这类探测器，
+#    **恰好在没人盯着的时候停止运行**。
+#
+# 含周末：§8.6 的暂停计时不认交易日。
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
+        with:
+          enable-cache: true
+          python-version: '3.13'
+      - run: uv sync --locked
+      - name: 不变式（连库跑，以 pipeline_writer 身份）
+        env:
+          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+        run: uv run python -m pipeline.check_invariants
+      - name: anon 越权集成测试（§9.3.3）
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+          SUPABASE_TESTS_REQUIRED: '1'
+        run: uv run pytest -q pipeline/tests/test_db_integration.py

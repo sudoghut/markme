@@ -1,0 +1,70 @@
+name: daily
+
+# 美股正常收盘 16:00 ET，触发取**收盘 +60 分钟**（§7.1）。
+#
+# 收盘后 5 分钟，免费数据源的 consolidated close 普遍还没定稿
+# （收盘集合竞价与延迟申报通常要到 16:15–16:30 ET 才稳定）。
+# 等一小时彻底避开这段不确定区间，代价只是「晚一小时能看」——
+# 对 EOD 看板不构成任何损失，却省掉了 preliminary/final 两段式
+# 带来的额外状态、额外一跑和额外的前端标记。
+# **宁可晚一小时，不要一个会变的数字。**
+#
+# **GitHub cron 只认 UTC 且不懂夏令时**，所以挂两个时间点，
+# 由脚本自己判断是否真的过了收盘 +60min（§7.2 闸门 2）。
+# 实际放行：EST 两跑通过（17:00 / 17:40 ET），EDT 四跑全部通过。
+# 没通过的那些记 skipped_too_early，exit 0，不告警。
+on:
+  schedule:
+    - cron: "0 21 * * 1-5" # EDT 17:00 ET（=收盘+1h）/ EST 16:00 ET（太早，被闸门 2 拦）
+    - cron: "0 22 * * 1-5" # EST 17:00 ET（=收盘+1h）/ EDT 18:00 ET
+    - cron: "40 21 * * 1-5" # 条件重试
+    - cron: "40 22 * * 1-5" # 条件重试
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "已有 ok 记录也强制重跑"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: markme-daily
+  # **不取消正在跑的，排队执行。** 取消会把 T2 打断在半路 ——
+  # 数据会完整回滚（那没问题），但 runs 里会留下一行永远停在 running，
+  # 而那是留给「硬崩溃」的信号。cron 延迟导致两跑重叠时不该发出那个信号。
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - run: uv sync --locked
+
+      - name: 跑管道
+        # secret 挂在 **step 级**而非 job/workflow 级（§8.3）：
+        # 上面的 checkout 与 uv sync 都不需要它。
+        env:
+          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: uv run python -m pipeline.run_daily ${{ inputs.force && '--force' || '' }}
+
+      - name: dead-man's switch
+        # §7.2.1：**沉默是这个设计里最危险的状态。**
+        # Actions 的失败通知只能对「跑了并且失败」告警，对「根本没跑」永远沉默 ——
+        # 而「管道不复存在」这一整类故障产出的正是沉默。
+        # 成功时 ping 一个 URL，**没收到 ping 才是告警**。
+        # 没配这个 secret 时静默跳过（它是可选的，缺它不该让管道变红）。
+        if: success() && env.HEALTHCHECK_URL != ''
+        env:
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+        run: curl -fsS --retry 3 --max-time 20 "$HEALTHCHECK_URL" || true

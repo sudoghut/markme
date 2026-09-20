@@ -1,0 +1,40 @@
+name: backfill
+
+# 全量回填，**只能手动触发**（§7.4）。改 universe / 改指标之后跑。
+#
+# 回填不过是「每天重抓整窗」这个操作的第一次执行（§6.1.1）——
+# lookback_bars 只有一个，回填与日常运行共用。这不是巧合而是设计：
+# 两个数字要对齐的地方，就是将来会不对齐的地方。
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '输入 BACKFILL 以确认（它会重写整个窗口）'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # 与 daily 同组：回填与日常运行都写同一批表，不能并发。
+  group: markme-daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: inputs.confirm == 'BACKFILL'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
+        with:
+          enable-cache: true
+          python-version: '3.13'
+      - run: uv sync --locked
+      - name: 回填
+        env:
+          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: uv run python -m pipeline.backfill
