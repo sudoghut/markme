@@ -36,16 +36,37 @@ export default async function Dashboard() {
       `prices_daily?select=symbol,date,close,adj_close&date=lte.${asOf}&order=date.desc&limit=${app.sparkline_bars * 20}`,
       R,
     ),
-    rest<{ date: string }>(`trading_sessions?select=date&date=lte.${todayISO()}&order=date.desc&limit=5`, R),
+    // **数 asOf 之后还有几个 session**，而不是取最近 N 个再去里面找。
+    // 取 5 个时，只要落后超过 4 个交易日就找不到 asOf，于是显示一个
+    // 编造的数字 —— 而「落后很多」恰恰是 dead-man 场景，
+    // 是这条黄条唯一真正要说清楚的时刻。
+    rest<{ date: string }>(
+      `trading_sessions?select=date&date=gt.${asOf}&date=lte.${todayISO()}&order=date.asc&limit=500`,
+      R,
+    ),
   ]);
+
+  // **四个读都必须 fail closed。**
+  //
+  // 之前只有 metrics 失败会走 Unavailable：ranks 失败 → 三强横条空着、
+  // 表格里的 ★ 全没了；prices 失败 → 每一行都「数据缺失」；
+  // sessions 失败 → 陈旧黄条**不显示**。
+  // 于是一次瞬时故障会发布一个 HTTP 200、看起来完全正常、
+  // 而内容是错的或残缺的页面 —— 那正是 §10.6 要防的白屏的另一种形态：
+  // 不是白屏，是**看起来没事**。
+  // 逐个写，不用循环 —— TypeScript 的收窄跟不过异构数组，
+  // 而这四行的全部价值就在于每一行都真的挡住了一种失败。
   if (!metrics.ok) return <Unavailable reason={metrics.reason} status={metrics.status} />;
+  if (!ranks.ok) return <Unavailable reason={ranks.reason} status={ranks.status} />;
+  if (!prices.ok) return <Unavailable reason={prices.reason} status={prices.status} />;
+  if (!sessions.ok) return <Unavailable reason={sessions.reason} status={sessions.status} />;
 
   const metricBySymbol = new Map(metrics.rows.map((m) => [m.symbol, m]));
-  const rankBySymbol = new Map((ranks.ok ? ranks.rows : []).map((r) => [r.symbol, r]));
+  const rankBySymbol = new Map(ranks.rows.map((r) => [r.symbol, r]));
 
   const sparkBySymbol = new Map<string, number[]>();
   const latestPrice = new Map<string, PriceRow>();
-  if (prices.ok) {
+  {
     for (const p of prices.rows) {
       const arr = sparkBySymbol.get(p.symbol) ?? [];
       if (arr.length < app.sparkline_bars) arr.push(p.adj_close);
@@ -82,12 +103,11 @@ export default async function Dashboard() {
 
   // 顶部黄条：>1 个交易日未更新（§10.6）。
   //
-  // `findIndex` 给的是「往回数第几个 session」：最新那个是 0，
-  // 上一个是 1。而「落后几个交易日」的自然读法是：最新 = 1 个交易日（不落后）。
-  // 所以是 index + 1，且 index === 0 时结果为 1 —— StaleBanner 在 <= 1 时不显示。
-  const idx = sessions.ok ? sessions.rows.findIndex((s) => s.date === asOf) : 0;
-  const behind = idx < 0 ? 99 : idx + 1;
-  const top3 = (ranks.ok ? ranks.rows : []).filter((r) => r.in_top_n).slice(0, strength.top_n);
+  // `sessions` 里装的是 asOf **之后**的 session，所以「落后几个交易日」
+  // 就是它的行数 + 1（没有任何一行 = 数据就是最新的 = 1）。
+  // 这个算法对落后 1 天和落后 40 天同样准确 —— 而后者才是真正要说清楚的那次。
+  const behind = sessions.rows.length + 1;
+  const top3 = ranks.rows.filter((r) => r.in_top_n).slice(0, strength.top_n);
 
   return (
     <>
@@ -114,7 +134,7 @@ export default async function Dashboard() {
 
         <TopThree
           rows={top3}
-          all={ranks.ok ? ranks.rows : []}
+          all={ranks.rows}
           scoreMetric={strength.score_metric}
           squeakK={strength.squeak_k ?? 0.1}
           topN={strength.top_n}
