@@ -371,9 +371,19 @@ def run_once(
     # 修订点若早于那个窗口，trading_sessions 已经改了，而 metrics/strength
     # 会无限期停在旧的 ordinal 上。所以这里真的把左端点前移。
     repair_from = revision.repair_from if revision.needs_repair else None
-    if repair_from is not None and repair_from < start:
-        start = repair_from
-        report.note(f"修复窗口前移至 {start}（§9.1.4 第 3 条）")
+
+    # `write_from` 是**要写入**的最早一天；`start` 是**要抓取**的最早一天。
+    # 两者不同，因为指标需要预热。
+    write_from = min(start, repair_from) if repair_from is not None else start
+    if write_from < start:
+        # **修复点之前还要再取一整个 lookback 的历史。**
+        #
+        # 直接把 start 设成 repair_from 会让 EMA/RSI/alpha 在修复点上
+        # 从**冷启动**开始算 —— 于是一批本来正确的行被 NULL 或冷启动值覆盖，
+        # 然后还照这个结果重排了名次。预热不是可选项：
+        # §12 #5 整节在论证 EMA(60) 需要 6×N 的喂入量。
+        start, _ = lookback_window(sessions, write_from, cfg.app.lookback_bars)
+        report.note(f"修复：写入自 {write_from} 起，抓取自 {start} 起（含预热）")
 
     budget = RequestBudget(
         max_requests=cfg.app.max_requests_per_run,
@@ -498,15 +508,20 @@ def run_once(
     # 落后的与被剔除的，都要有一行**全 NULL** 的最新行 ——
     # 否则昨天那行会成为它们的最新行，带着昨天的 alpha/beta 与八个事件列。
     metrics += _null_rows(sorted({*lagging, *outcome.rejected}), session.date, cfg)
+    # 预热区只用于**计算**，不写库 —— 它自己的预热是不足的，
+    # 写回去会把更早那些本来正确的行覆盖成冷启动值。
+    metrics = [r for r in metrics if r["date"] >= write_from]
     pool = {s.symbol: s.type for s in cfg.universe.symbols}
-    # 正常情况只重排当天；日历历史修订之后，**受影响区间的每一天都要重排** ——
-    # ordinal 刚在它们脚下整体变过，而「相邻 session」「20 个 session 前」
-    # 两个判断的答案都跟着变了（§9.1.4 第 3 条第 3 步）。
-    rerank_days = (
-        [s.date for s in sessions if repair_from <= s.date <= session.date]
-        if repair_from is not None
-        else [session.date]
-    )
+    # **整个窗口都要重排，不是只排当天。**
+    #
+    # §3.0 规则 2 的那张表写得很直白：价格层、指标层、榜单层**三层一起**，
+    # 范围相同 ——「`strength_daily` | 同样日期范围，按日期删+插，全池重排」。
+    #
+    # 只排当天时：一次除息会让供应商追溯改写全部历史复权因子，于是历史
+    # `mom_20` 变了，而 `strength_daily` 还留着旧名次、旧 top-N 成员，
+    # 以及由它们派生的 `days_in_top_n`。代码甚至**检测到了**因子变化，
+    # 却只是记了一笔 —— 那正是「探测器响了但没人动手」。
+    rerank_days = [s.date for s in sessions if write_from <= s.date <= session.date]
     strength_by_day = {d: compute_strength(cfg, metrics, day=d, pool=pool) for d in rerank_days}
 
     # 6. T2：一个原子单元

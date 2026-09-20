@@ -208,17 +208,49 @@ class TestCalendarRepairIsBounded:
         from pipeline.run_daily import run_once
 
         code = _code(run_once)
-        assert "repair_from < start" in code, "必须把左端点前移"
-        assert "start = repair_from" in code
+        # 写入起点前移到修复点（抓取起点还要再往前一个预热窗口，见下一条）。
+        assert "min(start, repair_from)" in code, "必须把写入起点前移到修复点"
+        assert "write_from < start" in code
 
-    def test_every_affected_day_is_reranked(self) -> None:
-        """ordinal 刚在它们脚下整体变过，「相邻 session」「20 个 session 前」
-        两个判断的答案都跟着变了 —— 只重排当天是不够的。"""
+    def test_the_repair_window_carries_warm_up_history(self) -> None:
+        """**预热不是可选项。**
+
+        把抓取起点直接设成 repair_from，EMA/RSI/alpha 会在修复点上
+        从冷启动开始算 —— 一批本来正确的行被 NULL 或冷启动值覆盖，
+        然后还照这个结果重排了名次。
+        """
         from pipeline.run_daily import run_once
 
         code = _code(run_once)
-        assert "rerank_days" in code
+        assert "write_from" in code, "写入起点与抓取起点必须分开"
+        assert "lookback_window(sessions, write_from" in code, "修复也要取一整个预热窗口"
+        assert 'r["date"] >= write_from' in code, "预热区只用于计算，不写库"
+
+
+class TestTheWholeWindowIsReranked:
+    """§3.0 规则 2 的那张表：三层**同样日期范围**。
+
+    只排当天时，一次除息会让供应商追溯改写全部历史复权因子 ——
+    历史 ``mom_20`` 变了，而 ``strength_daily`` 还留着旧名次、旧 top-N 成员，
+    以及由它们派生的 ``days_in_top_n``。代码甚至**检测到了**因子变化，
+    却只是记了一笔。
+    """
+
+    def test_rerank_covers_the_window_not_just_today(self) -> None:
+        from pipeline.run_daily import run_once
+
+        code = _code(run_once)
+        assert "write_from <= s.date <= session.date" in code, "整窗重排"
         assert "for day, rows in strength_by_day.items()" in code
+
+    def test_the_spec_table_says_the_same_range(self) -> None:
+        """把依据钉在文档上 —— 这条约束将来最可能被当成「性能优化」删掉。"""
+        from pathlib import Path
+
+        doc = (Path(__file__).resolve().parents[2] / "docs" / "create-project.md").read_text(
+            encoding="utf-8"
+        )
+        assert "同样日期范围，**按日期删+插，全池重排**" in doc
 
 
 class TestBudgetExhaustionAbandonsTheRun:
