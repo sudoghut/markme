@@ -65,6 +65,36 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   已收紧到 3.13 与本机、CI、`uv.lock` 的解析标记一致 ——
   声明一个从来没被测过的 3.12 支持，是一句没人验证的承诺。
 
+## M6（前端）开始时第一件事 —— ~~已还~~
+
+- ~~**把 Vercel 的键位加回 `.env.example`**~~ **M6 已还。**
+  `VERCEL_TOKEN` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID` 与
+  `REVALIDATE_TOKEN` 都已加回，值一律写成占位符 ——
+  真值从本地 `.env` 读。
+
+## M6 / M7（前端）之前
+
+- **`dim_when` 需要一个 TypeScript 孪生实现。** §6.1 说前端用 js-yaml 直接读 YAML，
+  所以 `DimExpr.evaluate` 的语义要在前端重写一遍。**两份实现就是两个要对齐的地方**，
+  所以务必对齐这几条而不只是比较运算：
+  - Kleene 三值 `and` / `or`（`False and NULL` → False，`NULL and True` → NULL）
+  - `null` / `NaN` / **`Infinity`** / 非数值 一律 → 打灰（fail closed）
+  - 求值期绝不抛异常
+  - 根节点必须是比较或布尔运算
+
+
+- **`.gitattributes` 的二进制类型表**已预置常见前端资源（woff2/ico/webp），
+  新增其他类型时记得补，否则 `* text=auto eol=lf` 会去归一化二进制文件。
+
+## 随时
+
+- **Action 的 SHA 钉版本会腐烂。** `actions/checkout` v4.2.2（2024-10）与
+  `setup-uv` v5.3.1（2025-02）都已偏旧，且跑在 node20 runtime 上。
+  已加 `.github/dependabot.yml` 的 `github-actions` 生态来产生更新信号。
+- **`requires-python = ">=3.13"`。** 设计文档 §14 写的是 Python 3.12。
+  已收紧到 3.13 与本机、CI、`uv.lock` 的解析标记一致 ——
+  声明一个从来没被测过的 3.12 支持，是一句没人验证的承诺。
+
 ## M6（前端）开始时第一件事
 
 - **把 Vercel 的键位加回 `.env.example`**（M3 期间临时撤出，以免混进数据库那次提交）：

@@ -56,6 +56,9 @@ jobs:
         env:
           MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
           GITHUB_SHA: ${{ github.sha }}
+          # §10.1 的按需重验证。两者缺一就静默跳过。
+          SITE_URL: ${{ vars.SITE_URL }}
+          REVALIDATE_TOKEN: ${{ secrets.REVALIDATE_TOKEN }}
         run: uv run python -m pipeline.run_daily ${{ inputs.force && '--force' || '' }}
 
       - name: dead-man's switch
