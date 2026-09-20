@@ -13,9 +13,16 @@ from typing import Any
 import pytest
 import yaml
 
-from pipeline.config import CONFIG_DIR, Config, ConfigError, check_columns_match, load_config
+from pipeline.config import (
+    CONFIG_DIR,
+    STRUCTURAL_COLUMNS,
+    Config,
+    ConfigError,
+    check_columns_match,
+    load_config,
+)
 from pipeline.dim_expr import parse_dim_when
-from pipeline.tests.test_config import REAL_METRICS_COLUMNS
+from pipeline.schema import metrics_daily_columns
 
 
 def _raw(name: str) -> dict[str, Any]:
@@ -151,13 +158,13 @@ class TestStructuralColumns:
     """
 
     def test_full_table_columns_accepted(self, cfg: Config) -> None:
-        full = set(REAL_METRICS_COLUMNS) | {
-            "symbol",
-            "date",
-            "extra",
-            "provisional_metrics",
-            "computed_at",
-        }
+        """解析器返回的就是**整张表**的列 —— 含结构列。
+
+        让调用方自己维护一份「哪些列是结构列」，就是 §6.1.1 警告的
+        「两个要对齐的地方」。
+        """
+        full = metrics_daily_columns()
+        assert full >= STRUCTURAL_COLUMNS, "解析器应当把结构列也返回出来"
         check_columns_match(cfg, full)
 
 

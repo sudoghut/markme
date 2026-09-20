@@ -35,12 +35,12 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   若 `fetch.py` 直接 import 它，就要提升为直接依赖；
   或者用 `pandas.read_csv(url)`，那样不需要新增任何依赖。
 
-## M3（数据库）之前
+## M3（数据库）之前 —— ~~已还~~
 
-- **删掉 `test_config.py` 里的 `REAL_METRICS_COLUMNS` 常量。** M1 拿它当「数据库列」
-  的替身，两名 reviewer 已独立核对过它与 §9.1 的 DDL 一致。
-  M3 必须让解析器真的读 `0001_init.sql`，然后**删掉**这份手抄常量 ——
-  再复制一份就是 §6.1.1 警告的「两个要对齐的地方」。
+- ~~**删掉 `test_config.py` 里的 `REAL_METRICS_COLUMNS` 常量。**~~
+  **M3 已还。** `pipeline/schema.py` 现在真的解析 `0001_init.sql`，那份手抄常量
+  已删除。顺带：解析器本身改成词法感知的（`pipeline/sqltext.py`），
+  因为一个**答错而不是报错**的解析器会让 §6.2 的双向校验永远通过。
 
 ## M6 / M7（前端）之前
 
@@ -64,3 +64,16 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 - **`requires-python = ">=3.13"`。** 设计文档 §14 写的是 Python 3.12。
   已收紧到 3.13 与本机、CI、`uv.lock` 的解析标记一致 ——
   声明一个从来没被测过的 3.12 支持，是一句没人验证的承诺。
+
+## M6（前端）开始时第一件事
+
+- **把 Vercel 的键位加回 `.env.example`**（M3 期间临时撤出，以免混进数据库那次提交）：
+  ```
+  VERCEL_TOKEN=<your-vercel-token>
+  VERCEL_ORG_ID=
+  VERCEL_PROJECT_ID=
+  ```
+  本地 `.env` 里这三个已经填好 —— **值从 `.env` 读，不要往这里抄**：
+  这份文件在公开仓库里，而 team / project id 与 team 名都是账号结构的信息，
+  不该因为「它不算 secret」就顺手公开。新建的 Vercel 项目要落在
+  `.env` 里 `VERCEL_ORG_ID` 指向的那个 team 下。
