@@ -97,17 +97,23 @@ uv run python -m pipeline.check_invariants   # 线上数据库的 19 条不变�
 ```
 config/       四个 YAML —— 标的池、指标、强度、运行参数（前端构建期直读）
 pipeline/     Python 管道：抓取 → 闸门 → 计算 → 三事务写入
-supabase/     0001_init.sql + 回滚脚本 + invariants.sql（19 条）
+supabase/     0001_init.sql + 回滚脚本 + invariants.sql（20 条）
 web/          Next.js 前端（Server Components + ISR）
 .github/      五个 workflow：daily / backfill / ci / keepalive / heartbeat
 ```
 
 ## 一件值得单独说的事
 
-这个项目的每个里程碑都过两道 review 闸门（见 `docs/reviews/`）。
-到 M7 为止，闸门一共抓到 **18 条 SERIOUS**，而其中**大部分不在功能代码里，
-而在验证手段里** —— 断言换个角色跑就失明、守卫写在 `WHERE` 里对无 `GROUP BY`
-的聚合是死代码、缺凭证时整组测试静默跳过而 CI 全绿、解析器答错而不是报错。
+这个项目的每个里程碑都过两道 review 闸门（见 `docs/reviews/`）：
+一组 Claude review agent，再加一轮外部 codex CLI 复核，**修到干净为止才推进**。
+M0–M8 一共抓到 **45 条 SERIOUS**，逐条记在 `docs/reviews/`。
+
+其中很大一部分**不在功能代码里，而在验证手段里** —— 断言换个角色跑就失明、
+守卫写在 `WHERE` 里对无 `GROUP BY` 的聚合是死代码、缺凭证时整组测试静默跳过
+而 CI 全绿、解析器答错而不是报错、测试断言命中了注释里的解释文字而不是代码。
+
+还有三条是**上一轮的修复自己制造的**：修复本身对，它与另一条已经成立的约束的
+交互错了。单看 diff 看不出来 —— 这就是每一轮都重新全量复核、而不是只看新 diff 的理由。
 
 它们的共同点是：**坏掉时的症状是「一切正常」。**
 这也是本项目为什么在不变式、闸门和诚实标注上花掉了远多于「画图表」的篇幅。
@@ -144,7 +150,7 @@ implementation, not in theory:
 - `Ticker.calendar` and `Ticker.earnings_dates` describe *the same* next earnings
   one day apart; storing both makes the countdown announce an earnings that never happens.
 
-Hence **19 database invariants** run against production daily, a hard rule that
+Hence **20 database invariants** run against production daily, a hard rule that
 non-finite values become `NULL` (never 0, never yesterday's value), and a
 requirement that any one metric window uses exactly one data source.
 
