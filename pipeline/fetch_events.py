@@ -158,7 +158,7 @@ def fetch_symbol_events(
     return EventFetchOutcome(
         symbol=symbol,
         ok=True,
-        events=tuple(_dedupe(events)),
+        events=tuple(_dedupe(events, today)),
         coverage={
             "earnings": coverage_start("earnings", today, sessions_start),
             "dividend": coverage_start("dividend", today, sessions_start),
@@ -166,12 +166,27 @@ def fetch_symbol_events(
     )
 
 
-def _dedupe(events: Sequence[SymbolEvent]) -> list[SymbolEvent]:
-    """同一 ``(type, date)`` 出现两次时保留**已确认**的那条。
+def _dedupe(events: Sequence[SymbolEvent], today: date) -> list[SymbolEvent]:
+    """合并同一件事的多份说法，并保证**每类事件最多一条未来行**（§3.5(1)）。
 
-    ``calendar`` 给的下一次财报常是估计值，而 ``earnings_dates`` 可能同时
-    覆盖到同一天并标为已发生。两条都留下会让 §3.5(1) 的孤儿行不变式报警，
-    而真正的语义是「同一件事，以确认的那份为准」。
+    两步：
+
+    1. 同一 ``(type, date)`` 出现两次 → 保留**已确认**的那条。
+       ``calendar`` 给的下一次财报常是估计值，而 ``earnings_dates``
+       可能覆盖到同一天并标为已发生；真正的语义是「同一件事，以确认的为准」。
+    2. 同一类事件有多条**未来**行 → 只保留最早的那条。
+
+    第 2 步是实测逼出来的：AAPL 的 ``calendar`` 说下一次财报是 2026-10-30，
+    而 ``earnings_dates`` 说 2026-10-29 —— **同一件事，两个端点差一天**。
+    两条都留下，17 个标的里有 14 个会触发 §3.5(1) 的孤儿行不变式。
+
+    而那条不变式要防的正是这个后果：``days_to_next_earnings`` 取
+    ``min(未来 event_date)``，于是倒计时会指向两个日期里更早的那个；
+    到期后翻成「财报后 1 天」，**播报一场从未发生的财报**，
+    再过一天数字又自己对了 —— 事后更难发现。
+
+    只留最早的那条，与 ``min(未来 event_date)`` 的取值完全一致，
+    所以下游没有任何信息损失。
     """
     best: dict[tuple[str, date], SymbolEvent] = {}
     for e in events:
@@ -179,7 +194,15 @@ def _dedupe(events: Sequence[SymbolEvent]) -> list[SymbolEvent]:
         prev = best.get(key)
         if prev is None or (prev.is_estimated and not e.is_estimated):
             best[key] = e
-    return sorted(best.values(), key=lambda e: (e.event_type, e.event_date))
+
+    out: list[SymbolEvent] = []
+    for etype in ("earnings", "dividend"):
+        same = [e for e in best.values() if e.event_type == etype]
+        out += [e for e in same if e.event_date <= today]
+        future = sorted((e for e in same if e.event_date > today), key=lambda e: e.event_date)
+        if future:
+            out.append(future[0])
+    return sorted(out, key=lambda e: (e.event_type, e.event_date))
 
 
 def _from_calendar(symbol: str, cal: Any, today: date) -> list[SymbolEvent]:

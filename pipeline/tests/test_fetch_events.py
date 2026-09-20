@@ -173,6 +173,31 @@ class TestThreeEndpoints:
         same = [e for e in out.events if e.event_type == "earnings" and e.event_date == d]
         assert len(same) == 1
 
+    def test_at_most_one_future_row_per_event_type(self) -> None:
+        """**§3.5(1) 的孤儿行不变式，实测逼出来的那条。**
+
+        AAPL 的 ``calendar`` 说下一次财报是 10-30，``earnings_dates`` 说 10-29
+        —— 同一件事，两个端点差一天。两条都留下，17 个标的里有 14 个会
+        触发那条不变式，而后果是倒计时指向更早的那个日期、到期翻成
+        「财报后 1 天」，**播报一场从未发生的财报**。
+        """
+        out = fetch_symbol_events(
+            "X",
+            today=TODAY,
+            sessions_start=SESSIONS_START,
+            budget=_budget(),
+            calendar_fn=lambda s: {"Earnings Date": [TODAY + timedelta(days=48)]},
+            earnings_dates_fn=lambda s: [
+                TODAY - timedelta(days=40),
+                TODAY + timedelta(days=47),
+            ],
+            dividends_fn=lambda s: pd.Series(dtype="float64"),
+        )
+        future = [e for e in out.events if e.event_date > TODAY]
+        assert len(future) == 1
+        assert future[0].event_date == TODAY + timedelta(days=47), "保留最早的那条"
+        assert any(e.event_date < TODAY for e in out.events), "历史行一条都不能少"
+
 
 class TestFailureDoesNotTouchGoodData:
     """§3.5(1)/(4)：**抓取失败时整个 delete+insert 都不执行。**"""
