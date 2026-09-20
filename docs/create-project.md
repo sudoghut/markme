@@ -720,7 +720,7 @@ symbols:
 ```
 增删标的 = 改这一个文件 + 跑一次 backfill workflow。**不改任何代码。**
 
-### 6.1.1 `app.yaml` 里的四个运行参数
+### 6.1.1 `app.yaml` 里的运行参数
 
 ```yaml
 settle_minutes:        60     # §7.2 闸门 2：收盘后多久才认为收盘价已定稿（分钟）
@@ -739,7 +739,8 @@ sessions_horizon:      60     # §9.1.4：向未来预填多少个**交易日**
 events_refresh_weekday:     3   # 周三；非交易日则顺延到下一个交易日
 events_refresh_within_days: 10  # 事件临近此数时该标的改为每日刷新
 ```
-> 四个参数全部以**交易日**为单位（`settle_minutes` 除外，它是分钟）。
+> 单位规则：除 `settle_minutes`（分钟）与 `events_refresh_within_days`（日历日）外，
+> 其余窗口一律是**交易日**。
 > 初稿写过一个 `chart_window: 126` 和一个 `session_horizon_days: 90` ——
 > 前者在个股页删掉后没有任何消费者（真正被用到的 60 藏在注释里），
 > 后者是日历日而其余都是交易日。同一个 YAML 块里混单位，就是将来那个
@@ -835,7 +836,6 @@ metrics:
     params: {period: 20}
     min_bars: 21                   # 主排序分，漏了这条会靠 NaN 兜底（§4.1）
     display: {label: "20日动量", format: "pct:2", widget: signed}
-    derived:
 ```
 
 两条关于 `display` 的规则：
