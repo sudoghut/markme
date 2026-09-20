@@ -74,6 +74,23 @@ class SymbolWindow:
     def n_bars(self) -> int:
         return len(self.dates)
 
+    def on_session_axis(self) -> pd.Series:
+        """把 ``adj_close`` 铺到**连续的 ordinal 轴**上，缺的 session 留 NaN。
+
+        **这是 §9.1.4 第 4 条真正的落点。** 不铺开的话，``shift(20)``
+        数的是「20 **行**前」而不是「20 **个 session** 前」——
+        窗口里少一根 bar（停牌、薄票、日历修订），``mom_20`` 就变成了
+        21 个 session 的动量，却仍然叫 ``mom_20``。
+        而 ``mom_20`` 是排名分（§4.1），一个错了刻度的值会进入横截面，
+        再被 ``days_in_top_n`` 烤进历史（§4.2）—— **所有闸门全绿**。
+        """
+        idx = pd.RangeIndex(self.ordinals[0], self.ordinals[-1] + 1)
+        return pd.Series(self.adj_close.to_numpy(), index=pd.Index(self.ordinals)).reindex(idx)
+
+    def pick(self, series: pd.Series) -> pd.Series:
+        """从 ordinal 轴取回这个标的**实际有 bar 的那些行**，按日期顺序。"""
+        return series.reindex(pd.Index(self.ordinals)).reset_index(drop=True)
+
 
 def build_windows(
     prices: pd.DataFrame, ordinal_by_date: Mapping[date, int]
@@ -124,8 +141,12 @@ def compute_metrics(
     """
     bench_sym = cfg.universe.benchmark
     bench = windows.get(bench_sym)
+    # 基准收益也挂在 ordinal 上 —— 下面要按**日期**而不是按位置配对。
     bench_returns = (
-        session_returns(bench.adj_close, pd.Series(bench.ordinals))
+        pd.Series(
+            session_returns(bench.adj_close, pd.Series(bench.ordinals)).to_numpy(),
+            index=pd.Index(bench.ordinals),
+        )
         if bench
         else pd.Series(dtype="float64")
     )
@@ -135,17 +156,24 @@ def compute_metrics(
     ab_cfg, mom_cfg = by_id.get("alpha_beta_126"), by_id.get("mom_20")
 
     rows: list[dict[str, Any]] = []
-    for sym, w in windows.items():
-        adj = w.adj_close
+    prov_specs = [
+        (m.id, int(m.provisional_below)) for m in by_id.values() if m.provisional_below is not None
+    ]
 
-        rsi = _gate(rsi_wilder(adj, period=_p(rsi_cfg, "period", 14)), _mb(rsi_cfg, 15))
-        ema_v = _gate(ema(adj, period=_p(ema_cfg, "period", 60)), _mb(ema_cfg, 60))
-        vs_ema = close_vs_ema_pct(adj, ema_v)
-        slope = ema_slope(ema_v, lag=20)
-        mom = _gate(momentum(adj, period=_p(mom_cfg, "period", 20)), _mb(mom_cfg, 21))
+    for sym, w in windows.items():
+        # **一律在 ordinal 轴上算**，算完再取回这个标的实际有的那些行。
+        # RSI / EMA 的递归对「缺一根」本来就该断（NaN 会顺着 IIR 传下去，
+        # 那是 M2 有意为之），而 shift 类指标则因此数对了 session 数。
+        axis = w.on_session_axis()
+
+        rsi = _gate(w.pick(rsi_wilder(axis, period=_p(rsi_cfg, "period", 14))), _mb(rsi_cfg, 15))
+        ema_axis = ema(axis, period=_p(ema_cfg, "period", 60))
+        ema_v = _gate(w.pick(ema_axis), _mb(ema_cfg, 60))
+        vs_ema = close_vs_ema_pct(w.adj_close, ema_v)
+        slope = w.pick(ema_slope(ema_axis, lag=20))
+        mom = _gate(w.pick(momentum(axis, period=_p(mom_cfg, "period", 20))), _mb(mom_cfg, 21))
 
         ab = _alpha_beta_for(w, bench_returns, ab_cfg, same=sym == bench_sym)
-        prov_all = _provisional(w.n_bars, by_id)
 
         for i, d in enumerate(w.dates):
             row: dict[str, Any] = {
@@ -168,7 +196,12 @@ def compute_metrics(
                 # *不提供该列* 时生效，提供了 NULL 就是 NULL。
                 # 实测：第一次真实回填就栽在这里，而它在单元测试里看不出来。
                 "extra": {},
-                "provisional_metrics": prov_all,
+                # **逐行算，不是逐窗口算。** §3.3 / §12 #5 的原话是
+                # 「`provisional_below: 180` 说的是**有 180 根历史的那一行**
+                # 可以不打灰」。按窗口算时，只要 lookback_bars ≥ 最大的
+                # provisional_below，**每一行都是空的** —— 于是 §10.4 的灰标
+                # 在任何地方都不会出现，而第 1–249 行本该全部打灰。
+                "provisional_metrics": _provisional_at(i + 1, prov_specs),
             }
             # alpha/beta 是窗口末端的一个标量（§3.4），只落在最后一行。
             if ab is not None and i == len(w.dates) - 1:
@@ -209,15 +242,27 @@ def _at(series: pd.Series, i: int) -> float | None:
 def _alpha_beta_for(w: SymbolWindow, bench_returns: pd.Series, ab_cfg: Any, *, same: bool) -> Any:
     if bench_returns.empty and not same:
         return None
-    rets = session_returns(w.adj_close, pd.Series(w.ordinals))
+    rets = pd.Series(
+        session_returns(w.adj_close, pd.Series(w.ordinals)).to_numpy(),
+        index=pd.Index(w.ordinals),
+    )
     other = rets if same else bench_returns
-    n = min(len(rets), len(other))
-    if n == 0:
+    if rets.empty or other.empty:
         return None
+    # **按 ordinal 配对，不是按位置。**
+    #
+    # 初版对两条序列各取末尾 n 个再 `reset_index(drop=True)`，那是**位置配对**：
+    # 标的窗口里只要有一个内部空洞（停牌、薄票、日历修订），它就比基准短，
+    # 于是每一个观测都被配到了错误的基准日。实测 beta 差 2.6 倍、R² 差 6.8 倍，
+    # 而 `n_obs` 仍然报 126 —— **没有任何东西会提示**。
+    # 闸门 3 也抓不到：标的的**最新**一根是对的，空洞在中间。
+    #
+    # alpha_beta 内部已经 `concat(..., join="inner").dropna()`，
+    # 所以只要带着 ordinal 索引进去，正确的对齐是免费的。
     params = dict(ab_cfg.params) if ab_cfg is not None else {}
     return alpha_beta(
-        rets.iloc[-n:].reset_index(drop=True),
-        other.iloc[-n:].reset_index(drop=True),
+        rets,
+        other,
         window=int(params.get("window", 126)),
         min_obs=int(params.get("min_obs", 120)),
         annualization=str(params.get("annualization", "linear")),
@@ -248,20 +293,15 @@ def _risk_free_daily(spec: Any) -> float:
     return annual / 252.0
 
 
-def _provisional(n_bars: int, by_id: Mapping[str, Any]) -> list[str]:
+def _provisional_at(history: int, specs: Sequence[tuple[str, int]]) -> list[str]:
     """§3.3 的**软**闸门：出值但标 provisional。
+
+    ``history`` 是**这一行**背后有多少根历史，不是整个窗口有多少根。
 
     与 ``min_bars`` 不是一回事 —— 一个说「出不出值」，一个说「信不信得过」。
     §3.3 写这条就是为了防止这两者被混用。
     """
-    # provisional_below 可以是 None（事件类指标没有「喂入量」这回事）——
-    # 那种指标不参与软闸门。
-    flagged = [
-        m.id
-        for m in by_id.values()
-        if m.provisional_below is not None and n_bars < int(m.provisional_below)
-    ]
-    return sorted(flagged)
+    return sorted(mid for mid, below in specs if history < below)
 
 
 def compute_strength(
