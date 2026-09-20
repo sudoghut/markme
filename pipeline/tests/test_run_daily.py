@@ -136,6 +136,34 @@ class TestWriteContracts:
         assert "delete from symbols" not in src
 
 
+class TestBudgetExhaustionAbandonsTheRun:
+    """§7.3.1 对预算/限流耗尽的处置是**放弃这一跑**，两个阶段一视同仁。
+
+    价格阶段一直是直接 return；事件阶段曾经写成「把事件清空然后照常跑完」
+    —— 那会把每一个标的最新行的八个事件列写成 NULL，
+    **包括库里本来就有、而且完全有效的那些**。
+    「中止」和「清空之后照常发布」不是一回事。
+    """
+
+    def test_both_phases_return_instead_of_continuing(self) -> None:
+        import inspect
+
+        from pipeline.run_daily import run_once
+
+        src = inspect.getsource(run_once)
+        # 两处 except 都必须以 return 收场，而不是把结果替换成空的再往下走。
+        # **去掉注释再断言。** 下面那段解释里就写着 `events_by_symbol = {}`，
+        # 直接对源文本断言会在散文上命中 —— 一条在注释上通过的断言
+        # 什么都没验证（这个错在本仓库里犯过两次了）。
+        code = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+        blocks = code.split("except (BudgetExceeded, RetryAfterTooLong)")[1:]
+        assert len(blocks) == 2, "价格阶段与事件阶段各一处"
+        for b in blocks:
+            body = b[:600]
+            assert "return report" in body, "必须放弃这一跑"
+            assert "events_by_symbol = {}" not in body, "不能清空事件再继续"
+
+
 class TestNullRowsForLaggingSymbols:
     """§7.2 闸门 3 的原话是「该标的**指标写 NULL**」—— 不是「不写」。"""
 
