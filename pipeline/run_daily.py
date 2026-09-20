@@ -534,6 +534,14 @@ def run_once(
     with data_transaction(conn):
         # trading_sessions 是 T2 所写指标的**输入**，它属于同一个原子单元。
         write_sessions(conn, sessions)
+        # 日历里消失的历史日，它的榜单行会变成**孤儿**：
+        # 基表里还在（于是 §9.3.2 的「每个 strength_daily.date 都必须在
+        # trading_sessions 里存在」会变红），而 v_strength_enriched 的
+        # INNER join 里已经没有它 —— 一行公开的、永远对不上的历史数据。
+        # 价格行按 §9.1.4 第 3 条第 2 步可以留着不管（计算侧已按 sessions 过滤），
+        # 但榜单行必须删。
+        for gone in revision.removed_historical:
+            replace_strength(conn, gone, [])
         write_symbols(conn, symbol_rows(cfg))
         report.rows_prices = upsert_prices(conn, list(d.changed))
         report.rows_metrics = upsert_metrics(conn, metrics)
