@@ -27,7 +27,11 @@ jobs:
           git config user.name  'markme-heartbeat'
           git config user.email '8538710+sudoghut@users.noreply.github.com'
           git add .heartbeat
-          git commit -m "chore: heartbeat $(date -u +'%Y-%m')" || exit 0
+          # **不要 `|| exit 0`。** `.heartbeat` 每次都会变，所以 commit 本该必然成功；
+          # 吞掉它的失败（token 过期、分支保护、push 被拒）会让这个 job 常绿，
+          # 而 60 天后 GitHub 会停用 schedule —— 管道就此**静默停摆**，
+          # 而这个 workflow 存在的全部理由就是防止那件事。
+          git commit -m "chore: heartbeat $(date -u +'%Y-%m')"
           git push
 
       # §9.4 的备份论证：**绝大部分数据都能从供应商重新推导**，所以影响低 ——
