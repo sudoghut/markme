@@ -17,7 +17,7 @@ requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.1",
     "pandas>=2.2",
-    "pandas-market-calendars>=5.4,<6", # §7.2 闸门 1/2 的 XNAS 日历
+    "pandas-market-calendars>=5.4,<6", # §7.2 闸门 1/2 的交易日历（NASDAQ）
     "psycopg[binary]>=3.2",            # §9.1.2 需要真事务，PostgREST 做不到
     "pydantic>=2.9",                   # §6 config 校验
     "pyyaml>=6.0",
