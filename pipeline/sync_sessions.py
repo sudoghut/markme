@@ -28,7 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅类型
     from pipeline.config import Config
     from pipeline.sessions import Session
 
-__all__ = ["reconcile", "session_rows", "sync_sessions"]
+__all__ = ["plan_sessions", "reconcile", "session_rows", "write_sessions"]
 
 
 def session_rows(sessions: list[Session]) -> list[dict[str, Any]]:
@@ -57,15 +57,27 @@ def reconcile(cfg: Config, today: date) -> list[Session]:
     return sessions
 
 
-def sync_sessions(
+def plan_sessions(
     conn: psycopg.Connection[Any], cfg: Config, today: date
 ) -> tuple[list[Session], CalendarRevision]:
-    """对账并写库，返回新表与**与旧表的差异**。
+    """**只读**：算出新表并与库里现有的比对。不写、不提交。
 
-    差异要分类（§9.1.4 第 3 条）：
-    地平线延长每天都会发生，**无需任何重算**；历史日增减才要从最早变化点
-    起做一次完整修复。不分开的话每天都会触发一次「完整修复」，
-    那既昂贵又会把 ``partial`` 变成常态 —— 而常态化的告警等于没有告警。
+    写入被单独拆到 :func:`write_sessions`，由调用方放进 T2 —— 两条约束
+    必须同时满足，而它们看起来是矛盾的：
+
+    1. **不能在这里提交**（§9.1.4）：一次以 failed 收场的运行若已经改写了
+       ordinal，就可能删掉 strength_daily 还在引用的历史日期，
+       于是那些行从视图的 INNER join 里无声消失、`days_in_top_n` 从头数起。
+    2. **不能把事务一直开着**：整窗抓取按 §7.3.1 的设计要跑 5–10 分钟，
+       挂着一个 idle-in-transaction 的连接会挡住 vacuum，
+       而且是 pooler 空闲事务杀手最爱的形状 —— 被杀的表现是一次健康运行报 failed。
+
+    拆成「先只读地算完、放掉事务、抓取、再在 T2 里写」就同时满足了两条。
+
+    返回的差异要分类（§9.1.4 第 3 条）：地平线延长每天都会发生，
+    **无需任何重算**；历史日增减才要从最早变化点起做一次完整修复。
+    不分开的话每天都会触发一次「完整修复」，那既昂贵又会把 ``partial``
+    变成常态 —— 而常态化的告警等于没有告警。
     """
     with conn.cursor() as cur:
         cur.execute("select date from trading_sessions")
@@ -73,7 +85,11 @@ def sync_sessions(
 
     sessions = reconcile(cfg, today)
     revision = diff_sessions(old, [s.date for s in sessions], today=today)
+    return sessions, revision
 
+
+def write_sessions(conn: psycopg.Connection[Any], sessions: list[Session]) -> None:
+    """**在 T2 里**把整张表重写一遍。见 :func:`plan_sessions` 的两条约束。"""
     rows = session_rows(sessions)
     with conn.cursor() as cur:
         # 全量对账：先清空再写。这张表可从日历包完整再生，删得起 ——
@@ -84,4 +100,3 @@ def sync_sessions(
             "values (%s, %s, %s, %s)",
             [(r["date"], r["ordinal"], r["is_half_day"], r["close_et"]) for r in rows],
         )
-    return sessions, revision

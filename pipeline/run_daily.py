@@ -54,7 +54,7 @@ from pipeline.store import (
 from pipeline.store import (
     sync_symbols as write_symbols,
 )
-from pipeline.sync_sessions import sync_sessions
+from pipeline.sync_sessions import plan_sessions, write_sessions
 from pipeline.sync_symbols import symbol_rows
 from pipeline.throttle import BudgetExceeded, RequestBudget, RetryAfterTooLong
 
@@ -306,7 +306,9 @@ def run_once(
     # 引用的日期，于是那些行从 v_strength_enriched 的 INNER join 里
     # 无声消失、days_in_top_n 从头数起（§9.1.4 那段加框的警告）。
     # trading_sessions 是 T2 所写指标的输入，它属于同一个原子单元。
-    sessions, revision = sync_sessions(conn, cfg, now.astimezone(ET).date())
+    sessions, revision = plan_sessions(conn, cfg, now.astimezone(ET).date())
+    # 只读算完就把事务放掉 —— 下面的抓取要跑 5–10 分钟。
+    conn.rollback()
     if revision.needs_repair:
         # §9.1.4 第 5 条：「变更触发的重算记为 partial **而非静默进行**」。
         # 静默的后果很具体：ordinal 刚在这些标的脚下整体变过，而
@@ -416,7 +418,14 @@ def run_once(
         return report
 
     # 4b. 事件（§3.5）。**失败不得惊动主管道** —— 见下面的 ok_events_stale。
-    events_by_symbol, events_ok = _refresh_events(conn, cfg, symbols, session.date, budget)
+    try:
+        events_by_symbol, events_ok = _refresh_events(conn, cfg, symbols, session.date, budget)
+    except (BudgetExceeded, RetryAfterTooLong) as exc:
+        # 全局护栏，不是「事件失败」—— §7.3.1 说这两种都记 partial。
+        conn.rollback()
+        events_by_symbol, events_ok = {}, True
+        report.status = "partial"
+        report.note(f"事件阶段中止：{exc}")
     if not events_ok and report.status == "ok":
         report.status = "ok_events_stale"
         report.note("事件抓取失败，核心指标照常写入（§3.5(4)）")
@@ -445,6 +454,8 @@ def run_once(
         report.note(f"复权因子变化：{', '.join(d.factor_changed)}（§3.0 规则 2）")
 
     with data_transaction(conn):
+        # trading_sessions 是 T2 所写指标的**输入**，它属于同一个原子单元。
+        write_sessions(conn, sessions)
         write_symbols(conn, symbol_rows(cfg))
         report.rows_prices = upsert_prices(conn, list(d.changed))
         report.rows_metrics = upsert_metrics(conn, metrics)

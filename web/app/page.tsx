@@ -56,26 +56,42 @@ export default async function Dashboard() {
 
   const rows: Row[] = symbols.rows.map((s) => {
     const p = latestPrice.get(s.symbol);
+    // **只有当天的价格才算「最新价」。**
+    //
+    // 价格是按 `date <= asOf` 取的最近一行，所以一个被闸门 3 判为落后、
+    // 或被闸门 4 剔除的标的，会拿回**昨天**那一行 —— 然后被渲染在
+    // 「数据截至 <今天>」的表格里。那是一个静默的错数：页面在说
+    // 「这是今天的收盘价」，而它不是。
+    //
+    // 管道对这些标的写的是一行全 NULL 的指标（§7.2 闸门 3），
+    // 所以这里跟着把整行按「数据缺失」处理，与 §10.6 的那一条一致。
+    const fresh = p !== undefined && p.date === asOf;
+    const m = metricBySymbol.get(s.symbol) ?? null;
     return {
       symbol: s.symbol,
       name: s.name,
-      metrics: metricBySymbol.get(s.symbol) ?? null,
+      metrics: fresh ? m : null,
       rank: rankBySymbol.get(s.symbol) ?? null,
       // 倒序取回来的，画图要正序。
       spark: (sparkBySymbol.get(s.symbol) ?? []).slice().reverse(),
       // §3.0 规则 3：Stooq 行的 close 是 NULL → 显示复权价并加角标。
-      latestClose: p ? (p.close ?? p.adj_close) : null,
-      closeIsAdjusted: p ? p.close === null : false,
+      latestClose: fresh ? (p.close ?? p.adj_close) : null,
+      closeIsAdjusted: fresh ? p.close === null : false,
     };
   });
 
   // 顶部黄条：>1 个交易日未更新（§10.6）。
-  const behind = sessions.ok ? sessions.rows.findIndex((s) => s.date === asOf) : 0;
+  //
+  // `findIndex` 给的是「往回数第几个 session」：最新那个是 0，
+  // 上一个是 1。而「落后几个交易日」的自然读法是：最新 = 1 个交易日（不落后）。
+  // 所以是 index + 1，且 index === 0 时结果为 1 —— StaleBanner 在 <= 1 时不显示。
+  const idx = sessions.ok ? sessions.rows.findIndex((s) => s.date === asOf) : 0;
+  const behind = idx < 0 ? 99 : idx + 1;
   const top3 = (ranks.ok ? ranks.rows : []).filter((r) => r.in_top_n).slice(0, strength.top_n);
 
   return (
     <>
-      <StaleBanner asOf={asOf} sessionsBehind={behind < 0 ? 99 : behind + 1} />
+      <StaleBanner asOf={asOf} sessionsBehind={behind} />
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
         <header className="flex flex-wrap items-baseline justify-between gap-2">
           <div>

@@ -165,8 +165,10 @@ class TestWholeWindowDegradation:
 
     def test_a_missing_symbol_is_refetched_whole_window_from_stooq(self) -> None:
         raw = _yf_raw({"AAPL": [100.0] * 5, "MSFT": [None] * 5})
+        # high/low 必须真的包住 close —— 否则闸门 4 会（正确地）判它 OHLC 不一致，
+        # 而这条测试要验的是降级路径，不是脏数据路径。
         csv = "Date,Open,High,Low,Close,Volume\n" + "".join(
-            f"{d},99,101,98,{100 + i},1000\n" for i, d in enumerate(DAYS)
+            f"{d},{100 + i},{101 + i},{99 + i},{100 + i},1000\n" for i, d in enumerate(DAYS)
         )
         out = fetch_window(
             ["AAPL", "MSFT"],
@@ -176,6 +178,7 @@ class TestWholeWindowDegradation:
             yf_frame=lambda s, a, b: yfinance_frame(s, a, b, download=lambda *x, **k: raw),
             stooq=lambda sym, a, b: stooq_frame(sym, a, b, fetch_csv=lambda *x: csv),
         )
+        assert out.rejected == (), "干净的降级数据不该被剔除"
         assert out.degraded == ("MSFT",)
         assert out.missing == ()
         assert out.per_symbol_source == {"AAPL": "yfinance", "MSFT": "stooq"}
@@ -312,6 +315,42 @@ class TestGateFourActuallyRejects:
         out = self._run(None)
         assert out.rejected == ("MU",)
         assert set(out.frame["symbol"]) == {"AAPL"}
+
+    def test_a_degraded_symbol_cannot_confirm_itself(self) -> None:
+        """**备源不能给自己做第二意见。**
+
+        yfinance 对 MU 一行都没给 → 整窗降级到 Stooq；而那份 Stooq 数据
+        本身又没过闸门 4。此时再问一次 Stooq 只会拿回同一份数据 ——
+        一个**持续存在的** Stooq 坏 tick 会因此被「确认」并写进库。
+        没有独立的第二个源，就按同一条原则办：比不出来就不信。
+        """
+        raw = _yf_raw({"AAPL": [100.0] * 5, "MU": [None] * 5})
+        bad = self._stooq([100.0, 101.0, 0.01, 103.0, 104.0])
+        out = fetch_window(
+            ["AAPL", "MU"],
+            START,
+            END,
+            _budget(),
+            yf_frame=lambda s, a, b: yfinance_frame(s, a, b, download=lambda *x, **k: raw),
+            stooq=lambda sym, a, b: stooq_frame(sym, a, b, fetch_csv=lambda *x: bad),
+        )
+        assert out.rejected == ("MU",)
+        assert set(out.frame["symbol"]) == {"AAPL"}
+
+    def test_a_clean_degraded_symbol_is_still_kept(self) -> None:
+        """降级本身不是问题 —— 只有没过闸门 4 才是。"""
+        raw = _yf_raw({"AAPL": [100.0] * 5, "MU": [None] * 5})
+        good = self._stooq([100.0, 101.0, 102.0, 103.0, 104.0])
+        out = fetch_window(
+            ["AAPL", "MU"],
+            START,
+            END,
+            _budget(),
+            yf_frame=lambda s, a, b: yfinance_frame(s, a, b, download=lambda *x, **k: raw),
+            stooq=lambda sym, a, b: stooq_frame(sym, a, b, fetch_csv=lambda *x: good),
+        )
+        assert out.rejected == ()
+        assert out.degraded == ("MU",)
 
     def test_the_cross_source_diff_is_reported(self) -> None:
         out = self._run([100.0, 101.0, 102.0, 103.0, 104.0])

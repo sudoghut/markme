@@ -464,6 +464,15 @@ def fetch_window(
     rejected: list[str] = []
     diffs: dict[str, float] = {}
     for sym in suspicious:
+        if per_source.get(sym) == "stooq":
+            # **备源不能给自己做第二意见。**
+            #
+            # 这个标的已经是降级来的（yfinance 一行都没给），再问一次 Stooq
+            # 只会拿回同一份数据 —— 一个持续存在的 Stooq 坏 tick 会因此被
+            # 「确认」并写进库。没有独立的第二个源，就没有可比的东西：
+            # 按同一条原则处理 —— **比不出来就不信**。
+            rejected.append(sym)
+            continue
         try:
             second = budget.request(
                 lambda s=sym: stq(s, start, end),  # type: ignore[misc,operator]
