@@ -277,10 +277,13 @@ def revalidate_site(report: RunReport) -> None:
         # 只认 ok 时，一次事件抓取失败（ok_events_stale）叠加一次重验证失败
         # 会保持 exit 0 —— 而页面可能整整一小时停在旧内容上，无人知晓。
         report.escalate("partial")
-        report.note(
-            f"重验证返回 {status}（不是 200）—— "
-            "多半是 middleware 的 matcher 没排除 /api/*，请求被 307 到了 /login"
-        )
+        hint = {
+            307: "middleware 的 matcher 没排除 /api/*，请求被 307 到了 /login",
+            302: "多半是 Vercel 的 Deployment Protection 挡住了（它会跳到 vercel.com/sso-api）",
+            401: "Vercel 的 Deployment Protection，或 REVALIDATE_TOKEN 与 Vercel 上的不一致",
+            403: "Vercel 的 Deployment Protection",
+        }.get(status, "检查 SITE_URL 指向的部署是否开着 Deployment Protection")
+        report.note(f"重验证返回 {status}（不是 200）—— {hint}")
 
 
 def _null_rows(symbols: Sequence[str], day: date, cfg: Config) -> list[dict[str, Any]]:
