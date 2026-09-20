@@ -446,6 +446,37 @@ from private.runs
 where status = 'running'
   and started_at < now() - interval '2 hours';
 
+-- name: ok_events_stale 的那一跑不得发布事件倒计时
+--
+-- §3.5(4)：事件抓取失败时「核心价格与四个核心指标照常写入，**事件列写 NULL**」。
+--
+-- 为什么必须单独有这一条：上面那条「倒计时必须与 symbol_events 一致」
+-- **抓不到这个错误** —— 它比的正是同一条陈旧的行，于是完全自洽。
+-- 而抓取失败的时候，库里那条「下一次财报」恰恰最可能是已经被改期、
+-- 已经作废的那一条（改期正是我们每周去抓一次的全部理由）。
+-- 拿它发布出去，倒计时会走向一个不存在的日子，到期后翻成「财报后 1 天」。
+select m.symbol || ' ' || m.date::text as violation
+from metrics_daily m
+where m.date = (select max(date) from metrics_daily)
+  and exists (
+    select 1
+    from private.runs r
+    where r.session_date = m.date
+      and r.status = 'ok_events_stale'
+      and r.finished_at = (
+        select max(r2.finished_at) from private.runs r2
+        where r2.session_date = m.date and r2.finished_at is not null
+      )
+  )
+  and (m.days_to_next_earnings is not null
+       or m.days_since_last_earnings is not null
+       or m.days_to_next_dividend is not null
+       or m.days_since_last_dividend is not null
+       or m.next_earnings_date is not null
+       or m.next_dividend_date is not null
+       or m.next_earnings_is_estimated is not null
+       or m.next_dividend_is_estimated is not null);
+
 -- name: 至少一只分红股的某个 yfinance 历史行满足 close != adj_close
 --
 -- §3.0 规则 4 的探测器：新版 yfinance 默认 auto_adjust=True，此时返回的

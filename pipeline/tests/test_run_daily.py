@@ -169,6 +169,32 @@ class TestStatusEscalation:
         assert r.status == "stale_vendor", "同级不互相覆盖，消息都留在 messages 里"
 
 
+class TestEventsStalePublishesNulls:
+    """§3.5(4)：事件抓取失败时「核心价格与四个核心指标照常写入，**事件列写 NULL**」。
+
+    **不能把库里的旧事件再发布一遍。** 抓取失败的时候，库里那条「下一次财报」
+    恰恰最可能是已经被改期、已经作废的那一条 —— 而改期正是每周去抓一次的
+    全部理由。拿它算出的倒计时会走向一个不存在的日子，到期后翻成
+    「财报后 1 天」，**播报一场从未发生的财报**。
+
+    §9.3.2 那条「倒计时必须与 symbol_events 一致」**抓不到它**：
+    它比的正是同一条陈旧的行，于是完全自洽。所以另加了一条不变式。
+    """
+
+    def test_the_distances_are_cleared_when_the_fetch_failed(self) -> None:
+        from pipeline.run_daily import run_once
+
+        code = _code(run_once)
+        i = code.index('escalate("ok_events_stale")')
+        assert "events_by_symbol = {}" in code[i : i + 400], "失败时必须清空，不能沿用旧值"
+
+    def test_the_invariant_exists_and_is_independent(self) -> None:
+        from pipeline.invariants import parse_invariants
+
+        names = [a.name for a in parse_invariants()]
+        assert any("ok_events_stale" in n for n in names), names
+
+
 class TestCalendarRepairIsBounded:
     """§9.1.4 第 3 条：历史日增减 → **从最早变化点起**完整修复。
 
@@ -218,8 +244,12 @@ class TestBudgetExhaustionAbandonsTheRun:
         blocks = code.split("except (BudgetExceeded, RetryAfterTooLong)")[1:]
         assert len(blocks) == 2, "价格阶段与事件阶段各一处"
         for b in blocks:
-            body = b[:600]
-            assert "return report" in body, "必须放弃这一跑"
+            # **只看这个 except 块自己的块体** —— 切到第一个 return report 为止。
+            # 取一个固定字数的窗口会滑进后面的代码：`ok_events_stale` 那条路径
+            # 里有一句**合法的** `events_by_symbol = {}`（§3.5(4) 要求事件列写
+            # NULL），而这条断言针对的是「预算耗尽时别清空事件再继续」。
+            assert "return report" in b, "必须放弃这一跑"
+            body = b[: b.index("return report")]
             assert "events_by_symbol = {}" not in body, "不能清空事件再继续"
 
 
