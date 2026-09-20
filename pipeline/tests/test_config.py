@@ -24,31 +24,7 @@ from pipeline.config import (
     check_columns_match,
     load_config,
 )
-
-# 真实 metrics_daily 列集合（§9.1）。M3 会从 0001_init.sql 解析出同一份，
-# 届时这个常量与 SQL 的一致性由 M3 的测试负责。
-REAL_METRICS_COLUMNS = {
-    "rsi_14",
-    "ema_60",
-    "close_vs_ema60_pct",
-    "ema60_slope_20d",
-    "alpha_annual",
-    "beta",
-    "r2",
-    "corr",
-    "resid_vol_annual",
-    "alpha_t_stat",
-    "n_obs",
-    "mom_20",
-    "days_to_next_earnings",
-    "days_since_last_earnings",
-    "days_to_next_dividend",
-    "days_since_last_dividend",
-    "next_earnings_date",
-    "next_dividend_date",
-    "next_earnings_is_estimated",
-    "next_dividend_is_estimated",
-}
+from pipeline.schema import metrics_daily_columns
 
 
 @pytest.fixture(scope="module")
@@ -157,17 +133,21 @@ class TestWarmupInvariant:
 # ---------------------------------------------------------------------------
 class TestSchemaChecks:
     def test_real_config_matches_real_columns(self, cfg: Config) -> None:
-        """双向一致：既不多也不少。"""
-        check_columns_match(cfg, set(REAL_METRICS_COLUMNS))
+        """双向一致：既不多也不少。
+
+        右边现在是从 ``0001_init.sql`` 解析出来的真实列集合 ——
+        M1 期间那份手抄常量已删除（它是第二份需要对齐的名单）。
+        """
+        check_columns_match(cfg, metrics_daily_columns())
 
     def test_check_1_config_declares_column_db_lacks(self, cfg: Config) -> None:
-        cols = set(REAL_METRICS_COLUMNS) - {"ema60_slope_20d"}
+        cols = metrics_daily_columns() - {"ema60_slope_20d"}
         with pytest.raises(ConfigError, match="忘了迁移"):
             check_columns_match(cfg, cols)
 
     def test_check_2_db_has_column_config_lacks(self, cfg: Config) -> None:
         """反向检查 —— 初稿只做了正向，``ema60_slope_20d`` 正是这样漏掉的。"""
-        cols = set(REAL_METRICS_COLUMNS) | {"orphan_column"}
+        cols = metrics_daily_columns() | {"orphan_column"}
         with pytest.raises(ConfigError, match="空洞"):
             check_columns_match(cfg, cols)
 

@@ -1131,6 +1131,18 @@ Supabase 项目被暂停 —— 产出的正是沉默，在这个设计里**与�
    PostgREST 做不了多语句事务（见 §9.1）。走 psycopg 直连本来就需要连接串。
 
 所以：建一个 `pipeline_writer` 角色，**逐表授予恰好需要的动词**，用 psycopg 直连。
+
+> **M3 实测的两条连接事实**（两条都会让「按文档写」的实现连不上或坏掉）：
+> 1. **直连 `db.<ref>.supabase.co:5432` 连不通** —— 免费层的直连是 IPv6-only，
+>    而 GitHub Actions 的 runner 是 IPv4。实测超时。**必须走 pooler。**
+> 2. **pooler 要用 session 模式（5432），不是 transaction 模式（6543）。**
+>    §9.1.2 的 T1/T2/T3 需要真正的多语句事务，而 psycopg 默认在同一连接上
+>    复用预编译语句 —— 这两样在 transaction 模式下都会坏。
+>
+> 连接串形如：
+> `postgresql://pipeline_writer.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`
+> （pooler 的用户名是 `<role>.<ref>`，不是裸角色名。）
+
 一个 secret 换掉另一个 secret，但爆炸半径小一个数量级，且顺带解决事务问题。
 
 | 表 | 动词 | 为什么 |
@@ -1140,6 +1152,10 @@ Supabase 项目被暂停 —— 产出的正是沉默，在这个设计里**与�
 | `symbol_events` | + `DELETE` | §3.5(1) 的作废预告行清理（谓词受限，见 §9.3） |
 | `trading_sessions` | + `DELETE` | §9.1.4 的全量对账是删+重插（ordinal 每次重新推导）；它可从日历包完整再生，删得起 |
 | `private.runs` | `SELECT, INSERT, UPDATE` | 追加 + 改终态，从不删除 |
+
+> M3 实测确认这条边界是活的：写入角色连**清理自己的探针行**都做不到
+> （`permission denied for table metrics_daily`）。所以这三张表的修复
+> 只能走 UPDATE / upsert，永远不走 DELETE —— 实现时别指望「先删再插」。
 
 > 两条都要写死：
 > - **不要图省事写成 `grant ... delete on <全部表>`** —— 价格层与指标层是
@@ -1224,14 +1240,37 @@ Supabase 项目被暂停 —— 产出的正是沉默，在这个设计里**与�
 ### 8.4 越权测试在 fork PR 上跑不起来 —— 现在就决定怎么办
 
 §13 把「anon key 配 RLS 配错」的缓解押在「CI 中有 anon 越权集成测试」上。
-但 public repo 的 fork PR **拿不到任何 secret**，于是这个测试要么跳过
-（那么恰恰在外部贡献者动 `policies.sql` 时它是缺席的），
-要么把 anon key 存成仓库 **Variable**（完全正当 —— 它按设计就是可公开的，
-而且「让 fork PR 尝试对生产写入并断言必须失败」正是这个测试要断言的东西）。
+但 public repo 的 fork PR **拿不到任何 secret**，于是这个测试在 fork PR 上必然跳过
+—— 而那恰恰是外部贡献者动 `policies.sql` 的时候。
 
-**选后者**，并写进 M3 的验收标准。不要等到 M3 才发现这件事。
-（补一个口径：PostgREST 下被 RLS 拒绝的 INSERT 返回 **403 / `42501`**，
-401 是密钥缺失或无效 —— 测试断言要写对。）
+> **M3 实测推翻了本节的初稿结论。**
+>
+> 初稿说：把 anon key 存成仓库 **Variable** 而不是 Secret，
+> 「于是 fork PR 也能跑这组测试」。**后半句是错的。**
+> GitHub **不把仓库 Variable 传给由 fork 的 `pull_request` 触发的工作流** ——
+> 与 Secret 是同一条限制，只是 Variables 的文档页对此只字未提
+> （社区讨论 #44322 里由 GitHub 员工确认）。
+>
+> 用 Variable 依然是对的，但真正的理由只剩一条：**Secret 会在日志里被打码**，
+> 而这组测试排障时要看的正是 URL 与返回体。anon key 按设计可公开，打码只添乱。
+>
+> 于是 fork PR 上这组**必然跳过**，这件事无法用密钥形式绕过。
+> 剩下的选择是：让它在**凭证本来就该到位**的地方（push、schedule、
+> 本仓库自己的 PR）变成**硬失败**，见下。
+
+**结论**：anon key 存仓库 Variable；`SUPABASE_TESTS_REQUIRED` 在非 fork 的
+触发上置 1 —— 此时「缺凭证」是失败而不是跳过。
+否则变量被误删 / 改名 / 项目被暂停时，`pytest` 只打印 `28 skipped` 而 CI 全绿，
+§13 押注的这道防线就在没人盯着的稳定期（§7.2.1）悄悄消失。
+fork PR 置 0：无条件置 1 会让每一个外部贡献者的第一个 PR 都红，
+还附带一句「去检查仓库变量」—— 而他们看不到那些变量。
+
+> **口径（M3 实测，初稿写错了）：** 这个部署下 anon 被拒的写入返回
+> **HTTP 401**，body 是 `{"code":"42501", …, "permission denied for table …"}`。
+> 初稿写的 403 是错的。而 401 **不足以分辨**「被授权层拒绝」和「密钥无效」——
+> 后者同样是 401，只是 body 里没有 `code` 字段。
+> 所以测试**断在 SQLSTATE `42501` 上，不断在状态码上**：
+> 那是授权层自己给出的答案，而状态码只是 PostgREST 对它的翻译。
 
 ### 8.5 轮换与事故处置（初稿完全缺失）
 
@@ -1799,7 +1838,7 @@ where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity;
 写成 §11.5 中任何触及 `supabase/` 的里程碑的固定动作。
 
 ### 9.3.3 集成测试（§13 押注在它身上，所以要写死）
-- anon `insert into metrics_daily ...` → 必须 **403 / `42501`**。
+- anon `insert into metrics_daily ...` → 必须拿到 **`42501`**（本部署下 HTTP 401，见 §8.4）。
 - anon `select` **六张公开表逐一列举**（`trading_sessions` / `symbols` / `symbol_events`
   / `prices_daily` / `metrics_daily` / `strength_daily`）+ `v_strength_enriched`
   → 全部必须成功。
@@ -1830,7 +1869,7 @@ where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity;
 失败场景：某个 `0002` 迁移重建视图时分区列写漏了一个，迁移干净提交、
 `invariants.sql` 返回 0 行、§9.3.3 全过、403 态也不会触发（因为根本没有 403）——
 而首页的「今日三强」那条横条就是空的，或者每只股票都显示「在榜 1 天」。
-- 执行方式见 §8.4（anon key 存成仓库 Variable，让 fork PR 也能跑）。
+- 执行方式见 §8.4（anon key 存成仓库 Variable —— 为的是不被日志打码，**不是**为了 fork PR；fork PR 拿不到 Variable）。
 
 ### 9.4 迁移管理
 `supabase/migrations/NNNN_*.sql` 存在仓库里（顺序编号 + 幂等写法）。
@@ -2031,7 +2070,7 @@ Hobby 免费版没有** —— 免费版只有 "Vercel Authentication"，那不�
 | **M0** | 仓库骨架 | git init、目录结构、`pyproject.toml`、依赖锁（含哈希）、`.gitignore`、`.env.example`、`ci.yml`、LICENSE | `pytest` / `ruff` / `mypy` 在空项目上绿 | 0.5d |
 | **M1** | 配置层 | 4 个 YAML + pydantic schema | 非法 config 被明确报错；universe 17 个标的解析正确；**`min_bars ≤ provisional_below` 不变式生效**；§6.2 三条 CI 校验生效 | 0.5d |
 | **M2** | 指标引擎 | `pipeline/metrics/*` + 注册表 + 单元测试 | RSI/EMA 对齐手算 golden values（显式递归口径）；**QQQ 对自己 β=1、α=0、R²=1**；**`r2 == corr²`**；**合成拆股序列上 `close_vs_ema60_pct` 连续**；除零 / NaN / 样本不足 / 全 NaN 排名 均有测试；**事件距离的今天边界**（财报当天 `days_since=0` 且 `days_to` 指向下一季）有测试 | 1.5d |
-| **M3** | 数据库（六张表） | **前置（脚本，用管理 token）**：创建 `pipeline_writer` 角色 + 随机密码，**必须在 0001 之前**。**本里程碑交付**：`0001_init.sql`（REVOKE/GRANT、RLS 与策略、触发器、`v_strength_enriched` 完整 SQL，**不含 create role**）+ `0001_rollback.sql` + `invariants.sql` + §9.3.3 全部集成测试 | **在空库上执行**（M4 回填之前）；anon INSERT 得 403；anon SELECT **六张公开表 + 视图**全部成功；§9.3.2 两条不变式返回 0 行；回滚脚本实测可用 | **1.5d** |
+| **M3** | 数据库（六张表） | **前置（脚本，用管理 token）**：创建 `pipeline_writer` 角色 + 随机密码，**必须在 0001 之前**。**本里程碑交付**：`0001_init.sql`（REVOKE/GRANT、RLS 与策略、触发器、`v_strength_enriched` 完整 SQL，**不含 create role**）+ `0001_rollback.sql` + `invariants.sql` + §9.3.3 全部集成测试 | **在空库上执行**（M4 回填之前）；anon INSERT 得 `42501`（见 §8.4）；anon SELECT **六张公开表 + 视图**全部成功；§9.3.2 的不变式返回 0 行；回滚脚本实测可用 | **1.5d** |
 | **M4** | 抓取与写入 | `fetch.py`（整窗降级 + §7.2 闸门 4 的合理性断言）、**`sync_symbols.py`（config → `symbols`）**、**`sync_sessions.py`（XNAS 日历 → `trading_sessions`，带 ordinal）**、**`fetch_events.py`（财报/分红 → `symbol_events`，逐标的 17 次请求，按 §3.6(4) 的周频与 §7.3.1 的限流）**、`store.py`（T1/T2/T3 三事务 + NaN sanitizer）、`backfill.py` | 回补 400 根 bar 成功（约 126 个 NaN 前导行不炸）；重复跑 backfill 行数不变；复权因子变化能被检出；`close` 是否已拆股调整**实测确认一次**；**事件侧**：移动财报日不留孤儿行（§3.5(1) 不变式返回 0 行）、整窗 Stooq 降级跑通、`calendar['Ex-Dividend Date']` 究竟是下一次还是最近一次**实测确认一次** | **3.0d** |
 | **M5** | 自动化 | `daily.yml` + 四重闸门 + 条件重试 + `concurrency` + `runs` 日志 + dead-man's switch | **冻结时钟的单元测试**覆盖 4 个 cron 时刻 × 2 个时区(EST/EDT) × 2 类交易日(全日/半日) = 16 种组合，逐一断言闸门判定；手动 dispatch 跑通 | 1.0d |
 | **M6** | 前端骨架 | Next.js + 服务端读取 + 构建期直读 YAML + **显式列与 `extra` 双路读取** + **最小错误边界** + 部署 Vercel | 线上能看到真实数据的裸表格；新增一个 extra 指标无需改前端代码；**数据库不可达时显示「数据暂不可用」+ 正确 HTTP 状态码，不是白屏** | 1.0d |

@@ -53,6 +53,29 @@ jobs:
         run: uv run mypy
 
       - name: pytest
+        # SUPABASE_URL / SUPABASE_ANON_KEY 是仓库 **Variables** 而不是 Secrets
+        # （§8.4）。理由只有一条：**Secret 会在日志里被打码**，而这组测试
+        # 排障时要看的正是 URL 和返回体。anon key 按设计可公开，打码只添乱。
+        #
+        # **不是**「这样 fork PR 也能跑」—— 那条理由曾经写在这里，它是假的：
+        # GitHub 不把仓库 Variable 传给由 fork 的 pull_request 触发的工作流，
+        # 和 Secret 是同一条限制，只是 Variables 的文档页对此只字未提。
+        #
+        # SUPABASE_TESTS_REQUIRED：凭证**本来就该到位**的地方（push、schedule、
+        # 本仓库自己的 PR）置 1，此时缺凭证是失败而不是跳过。没有它，变量被误删 /
+        # 改名 / 项目被暂停时 pytest 只打印「28 skipped」而 CI 全绿 ——
+        # §13 押在这组测试上的那道防线就这样悄悄消失，而且（§7.2.1）
+        # 正好是在没人盯着的稳定期。
+        #
+        # fork PR 置 0：它们拿不到变量，无条件置 1 会让**每一个外部贡献者的
+        # 第一个 PR 都红**，还附带一句「去检查仓库变量」——而他们看不到那些变量。
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+          SUPABASE_TESTS_REQUIRED: >-
+            ${{ (github.event_name != 'pull_request'
+                 || github.event.pull_request.head.repo.full_name == github.repository)
+                && '1' || '0' }}
         run: uv run pytest
 
   # 公开仓库一旦泄露就是永久泄露（§8.3）。
