@@ -327,6 +327,84 @@ class TestNullRowsForLaggingSymbols:
         assert all(row[c] is None for c in EVENT_COLUMNS)
 
 
+class TestLaggingSymbolsKeepTheirHistory:
+    """闸门 3 判的是**新鲜度**，不是可信度。
+
+    曾经这里是 ``prices = prices[~prices["symbol"].isin(lagging)]`` ——
+    把落后标的的**整个窗口**丢掉，而只用 ``_null_rows`` 补回
+    ``session.date`` 那一行。后果按天计是隐形的，按修复计是灾难性的：
+
+    一次日历修复会把 rerank 窗口左移几百天，于是那几百天的榜单
+    **每一天**都被重写成「没有这个标的」，其余名次集体上移。
+    修复跑结束后窗口缩回滚动 400 根，比它更老的那些天**再也不会被重排** ——
+    错名次就是最终状态，而 ``days_in_top_n`` / ``rank_delta_1d``
+    正是从这些行导出的。
+
+    ``invariants.sql`` 一条都抓不到：涉及榜单的那几条都是
+    ``where date = max(date)``，而「视图不得比基表少行」两边同减、计数相等。
+    """
+
+    def test_run_once_does_not_drop_the_whole_window(self) -> None:
+        """负向断言。**这一条是本文件里唯一合理的 grep** ——
+
+        它钉的不是「代码里有某句话」，而是「代码里**不许**再出现那句话」，
+        而那正是 grep 唯一真正可靠的用法。
+        """
+        from pipeline.run_daily import run_once
+
+        code = _code(run_once)
+        assert "isin(lagging)" not in code, "落后标的的历史 bar 不能被整窗丢掉"
+
+    def test_a_symbol_without_todays_bar_still_ranks_on_earlier_days(self) -> None:
+        """行为测试：只要某天有该标的的指标行，那天的榜单就必须有它。"""
+        from pipeline.compute import compute_strength
+        from pipeline.config import load_config
+
+        cfg = load_config()
+        pool = {s.symbol: s.type for s in cfg.universe.symbols if s.enabled}
+        syms = sorted(pool)[:3]
+        older, today = date(2024, 6, 11), date(2024, 6, 12)
+
+        def row(sym: str, d: date, mom: float) -> dict[str, object]:
+            return {"symbol": sym, "date": d, "mom_20": mom, "extra": {}}
+
+        # 落后的是 syms[0]：它有 older 那天的行，没有 today 那天的行。
+        metrics: list[dict[str, object]] = [
+            row(syms[0], older, 5.0),
+            *[row(s, older, 1.0 + i) for i, s in enumerate(syms[1:])],
+            *[row(s, today, 1.0 + i) for i, s in enumerate(syms[1:])],
+        ]
+
+        older_rank = compute_strength(cfg, metrics, day=older, pool=pool)
+        assert syms[0] in {r["symbol"] for r in older_rank}, "历史那天必须还有它"
+        assert next(r for r in older_rank if r["symbol"] == syms[0])["rank"] == 1
+
+        today_rank = compute_strength(cfg, metrics, day=today, pool=pool)
+        assert syms[0] not in {r["symbol"] for r in today_rank}, "今天没有指标行 → 不进榜"
+
+
+class TestTheReadTransactionIsActuallyReleased:
+    """注释承诺放掉的事务，得真的有一行 ``rollback``。
+
+    ``_already_done`` 那条 SELECT 会开一个事务；连接是 ``autocommit=False``，
+    于是它一路挂到整窗抓取结束 —— 5–10 分钟的 idle-in-transaction，
+    正是 pooler 的空闲事务杀手最爱的形状，被杀的表现是一次健康运行报 ``failed``。
+    这段注释存在过一阵子，**底下却没有代码**。
+    """
+
+    def test_a_rollback_follows_the_already_done_check(self) -> None:
+        import inspect
+
+        from pipeline.run_daily import run_once
+
+        src = inspect.getsource(run_once)
+        after = src.split("_already_done(conn, session.date)", 1)[1]
+        head = after.split("# 3. 抓取整窗", 1)[0]
+        assert head.count("conn.rollback()") >= 2, (
+            "跳过分支一次、继续往下走的那条路也要一次 —— 注释承诺了就要有代码"
+        )
+
+
 def test_write_column_tuples_are_disjointly_correct() -> None:
     """三张表的写入列各自独立，不该互相抄。"""
     assert "rank" in STRENGTH_WRITE_COLUMNS

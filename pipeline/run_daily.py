@@ -32,7 +32,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from pipeline.calendar_gate import ET, interior_gaps, stale_symbols, when_to_run
+from pipeline.calendar_gate import (
+    ET,
+    interior_gaps,
+    last_settled_session,
+    stale_symbols,
+    when_to_run,
+)
 from pipeline.compute import build_windows, compute_metrics, compute_strength
 from pipeline.config import load_config
 from pipeline.fetch import fetch_window, restrict_to_sessions
@@ -342,10 +348,26 @@ def run_once(
         report.note(gate.reason)
         conn.rollback()
         return report
-    session = gate.session or max(
-        (s for s in sessions if s.date <= now.astimezone(ET).date()),
-        key=lambda s: s.ordinal,
-    )
+
+    if gate.should_run or force:
+        session = gate.session or last_settled_session(sessions, now, cfg.app.settle_minutes)
+    else:
+        # **修复跑不能用今天那根。**
+        #
+        # 走到这里只剩一种可能：闸门说了不跑，而 revision.needs_repair 把它顶开了。
+        # 而 `when_to_run` 在 skipped_too_early 分支里返回的 gate.session 是**今天** ——
+        # 于是一次自动触发的修复会去抓一根**还没过 settle_minutes** 的今日 bar：
+        # 16:00 ET 那条 cron 上就是敲钟那一刻的价，workflow_dispatch 上可以是盘中价。
+        #
+        # 闸门 3 拦不住（日期就是今天，`stale_symbols` 比的正是日期相等），
+        # 闸门 4 也拦不住（preliminary 与 consolidated 的差是千分位，
+        # 离 _MAX_DAILY_MOVE / _CROSS_SOURCE_TOLERANCE 十万八千里）。
+        # 写进去的就是 daily.yml 文件头那句「宁可晚一小时，不要一个会变的数字」
+        # 要防的东西，而且整窗 strength 都由它导出。
+        #
+        # 修复要的只是历史窗口，根本不需要今天那根 —— 钳到上一个已定稿的 session。
+        session = last_settled_session(sessions, now, cfg.app.settle_minutes)
+        report.note(f"日历修复绕过闸门（{gate.decision}），session 钳到已定稿的 {session.date}")
 
     report.session_date = session.date
     # **日历修订不能被「本日已做过」吞掉。**
@@ -364,6 +386,11 @@ def run_once(
     # 5–10 分钟，挂着一个 idle-in-transaction 的连接会挡住 vacuum，
     # 而且正是 pooler 的空闲事务杀手最爱的形状 —— 被杀的表现是
     # 一次健康运行报 failed。
+    #
+    # 这行 rollback 曾经**只有注释没有代码**：`_already_done` 那条 SELECT
+    # 会开一个事务，然后一路挂到整窗抓取结束 —— 正是注释自己描述的形状。
+    # （连接是 autocommit=False，见 store.py。）
+    conn.rollback()
 
     # 3. 抓取整窗（§3.0 规则 2）
     symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
@@ -430,6 +457,17 @@ def run_once(
 
     prices = restrict_to_sessions(outcome.frame, sessions)
     if prices.empty:
+        # **这里是唯一一次「一行都没有」的检查，而这一点是有意的。**
+        #
+        # 闸门 3 之后曾经还有第二次同样的检查，因为那时落后标的会被
+        # 整窗过滤掉、`prices` 可能在闸门 3 之后才变空。现在闸门 3 不再丢
+        # 任何行（见下面那段），于是第二次检查成了死代码 —— mypy --strict
+        # 当场指出 unreachable，删掉比留一段永不执行的「保护」诚实。
+        #
+        # 它要防的东西仍然由这一次挡住：供应商全线故障时若让 T2 照常执行，
+        # `replace_strength` 会先 `delete from strength_daily where date = ?`
+        # 再插 0 行 —— **当天的榜单被静默删掉**，
+        # 而 §7.2 承诺的是「重跑、补跑…结果都一样」。
         report.status = "failed"
         report.note("窗口内没有任何价格行")
         conn.rollback()
@@ -443,7 +481,25 @@ def run_once(
         # 已经是 partial 的话不要被覆盖回去（两者都 exit 1，但消息要留全）。
         report.escalate("stale_vendor" if bench in lagging else "partial")
         report.note(f"bar 落后：{', '.join(lagging)}")
-        prices = prices[~prices["symbol"].isin(lagging)].reset_index(drop=True)
+        # **只是尾部缺了一根，不是整窗都不可信 —— 所以这里什么都不丢。**
+        #
+        # 曾经这里是 `prices = prices[~prices["symbol"].isin(lagging)]`，
+        # 把落后标的的**整个窗口**丢掉，而下面只用 `_null_rows` 补回
+        # `session.date` 那**一行**。于是 compute_metrics 对它一行都不产出，
+        # compute_strength 直接把它排除出 scores（不是给末位，是不进榜），
+        # 而 replace_strength 是按日 delete+insert ——
+        # 一次日历修复会把 rerank 窗口左移几百天，于是那几百天的榜单
+        # **每一天**都被重写成「没有这个标的」，其余名次集体上移。
+        # 修复跑结束后 rerank 窗口缩回滚动 400 根，比它更老的那些天
+        # **再也不会被重排**，错名次就是最终状态 ——
+        # 而 days_in_top_n / rank_delta_1d 正是从这些行导出的。
+        #
+        # 闸门 3 判的是**新鲜度**，不是可信度：历史那些 bar 本来就是对的。
+        # 要挡住的只有「拿昨天那行当最新行」，而 `_null_rows` 已经在
+        # session.date 上补了一行全 NULL，它自然成为最新行。
+        #
+        # 也不会和 interior_gaps 重复报：那边的 expected 上界是标的自己的
+        # max(have)，尾部缺失不算空洞。
 
     # 闸门 3 的另一半：窗口**中间**的空洞。
     #
@@ -460,17 +516,6 @@ def run_once(
             report.note(
                 "窗口内有空洞：" + ", ".join(f"{s}缺{n}根" for s, n in sorted(gaps.items()))
             )
-
-    if prices.empty:
-        # **过滤之后要再查一次。** 上面那次检查在过滤之前。
-        # 供应商全线故障 + 一次 --force 重跑时，T2 照样会执行，
-        # 而 replace_strength 会先 `delete from strength_daily where date = ?`
-        # 再插 0 行 —— **当天的榜单被静默删掉**，
-        # 而 §7.2 承诺的是「重跑、补跑…结果都一样」。
-        report.status = "stale_vendor"
-        report.note("闸门 3 之后没有任何可用标的，跳过写入（不动已有数据）")
-        conn.rollback()
-        return report
 
     # 4b. 事件（§3.5）。**失败不得惊动主管道** —— 见下面的 ok_events_stale。
     try:
