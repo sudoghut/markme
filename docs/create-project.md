@@ -109,7 +109,9 @@ low-buy 自己的归档审计（`stocks/studies/archive_inventory/`）明确写�
    > 对 AAPL / MSFT / COST 这类长期分红股，三年窗口上可达几个百分点。
    > 这个量级不会一眼看出来，**因此比 10× 断崖更危险**：它足以把
    > 「距 EMA60 +0.8%」变成「-1.5%」，却不会让任何人起疑。
-   > （`close` 是否真的已拆股调整属于供应商行为，M4 要实测确认一次而不是假定。）
+   > **已实测确认（M0）**：NVDA 在 2024-06-10 的 10:1 拆股前后，
+   > 原始 `Close` 为 120.99 → 121.79，**没有 10× 断崖** —— 供应商的 `Close` 确实已做拆股调整。
+   > 两列的差只剩分红调整（AAPL 约 0.9%），正如上文所说，量级小反而更危险。
    → 单元测试：合成一条含分红调整的序列，断言 `close_vs_ema60_pct`
    与「全程用 adj_close 计算」的结果逐点相等；再合成一条 2:1 拆股序列，
    断言该列**跨拆股日连续**（这条测的是我们自己的实现，与供应商口径无关）。
@@ -184,6 +186,9 @@ low-buy 自己的归档审计（`stocks/studies/archive_inventory/`）明确写�
    正好落进 §13 的「指标口径与行情软件对不上 → 信任崩塌」。
    → CI 不变式：至少一只分红股在某个 `source = 'yfinance'` 的历史行上
    必须满足 `close != adj_close`。
+   > **已实测确认（M0，yfinance 1.7.0）**：`auto_adjust` 默认确为 `True`；
+   > 显式传 `False` 后仍返回独立的 `Adj Close` 列；
+   > AAPL 在 2024-05-28–2024-06-13 的 13 行上 `Close` 与 `Adj Close` **全部不同**。
    （`check (close > 0)` 这类约束抓不到它，约束必须是关于两者**差值**的。）
 
 ### 3.1 RSI(14) — Wilder 平滑
@@ -2218,7 +2223,7 @@ markme/
 ├─ config/
 │  └─ universe.yaml  metrics.yaml  strength.yaml  app.yaml
 │                              （前端构建期用 js-yaml 直读，无中间产物）
-├─ pipeline/                    Python 3.12（依赖锁定到哈希）
+├─ pipeline/                    Python 3.13（依赖锁定到哈希）
 │  ├─ config.py                 pydantic 加载 + 校验
 │  ├─ calendar_gate.py          交易日 / 结算时刻闸门（XNAS）
 │  ├─ fetch.py                  provider 抽象 + 整窗降级 + 合理性断言

@@ -1,0 +1,120 @@
+[project]
+name = "markme"
+description = "market metrics - read-only US-equity indicator dashboard, updated after each market close"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+# 版本号的唯一来源是 pipeline/__init__.py，避免两处各写一遍然后悄悄漂移。
+dynamic = ["version"]
+requires-python = ">=3.13"
+
+# 依赖锁定到哈希见 uv.lock（§8.1.1）：日常 job 持有唯一的写库凭证，
+# 只钉 GitHub Action 而让 PyPI 依赖浮动，是守住了小的那扇门。
+#
+# 下界写的是**实测跑过的版本**，不是历史遗留的旧下界。
+# 两个「非官方 API / 变动快」的包额外加上界：它们跨大版本会改行为，
+# 而本项目对它们的行为有具体假设（§3.0 / §3.5 / §7.3）。
+dependencies = [
+    "numpy>=2.1",
+    "pandas>=2.2",
+    "pandas-market-calendars>=5.4,<6", # §7.2 闸门 1/2 的 XNAS 日历
+    "psycopg[binary]>=3.2",            # §9.1.2 需要真事务，PostgREST 做不到
+    "pydantic>=2.9",                   # §6 config 校验
+    "pyyaml>=6.0",
+    "statsmodels>=0.14",               # §3.4 精确 OLS 截距标准误，不用近似式
+    "yfinance>=1.7,<2",                # 非官方 API，大版本必然带行为变化
+]
+
+# dev 工具走 dependency-groups 而不是 optional-dependencies：
+# uv sync 默认就装，且不会泄进发布出去的包元数据。
+[dependency-groups]
+dev = [
+    "mypy>=1.14",
+    "pandas-stubs>=2.2",
+    "pytest>=8.3",
+    "ruff>=0.13",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "pipeline/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pipeline"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# 用 extend-exclude 而不是 exclude —— 后者会**替换**掉 ruff 自带的默认排除表
+# （build/、dist/、.tox/ 等），而 hatchling 是本项目的构建后端，
+# 本地跑一次 uv build 之后 ruff 就会开始走查生成物。
+#
+# 为什么要排除 docs：ruff 的默认 include 含 *.md，会去格式化设计文档里的
+# 代码块 —— 那些是**示意用**的（含省略号、伪 SQL、并列写法），不该被改写。
+#
+# 只能写 "docs"。实测 "/docs" 与 "/docs/" 都**不生效**（ruff 仍会去改 docs/ 下的 md），
+# 所以没法用前导斜杠锚定到仓库根。代价是将来若出现 web/docs/ 也会被一并排除 ——
+# 届时改用更精确的 "docs/*.md"。
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", # pycodestyle
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # bugbear
+    "UP",     # pyupgrade
+    "SIM",    # simplify
+    "RUF",
+    "PD",     # pandas-vet
+    "NPY",    # numpy
+    "S",      # bandit —— §8.1.1 整节都在谈爆炸半径，这个该开
+]
+ignore = [
+    # 本项目的文档语言是中文，全角标点是**正确的**，不是误输入的半角符号。
+    # RUF001/002/003 在这种仓库里只会产生噪音，关掉而不是逐处 noqa。
+    "RUF001", # 标识符中的模糊字符
+    "RUF002", # docstring 中的模糊字符
+    "RUF003", # 注释中的模糊字符
+]
+
+[tool.ruff.lint.per-file-ignores]
+"pipeline/tests/*" = ["S101"] # 测试里 assert 是正常写法
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+files = ["pipeline"] # 裸跑 mypy 与 CI 行为一致
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+
+# 指标计算是本项目的地基（§11 M2），类型必须严格。
+# 第三方库缺 stub 的单独放行，而不是全局放松。
+[[tool.mypy.overrides]]
+module = [
+    "yfinance.*",
+    "pandas_market_calendars.*",
+    "statsmodels.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["pipeline/tests"]
+addopts = "-q --strict-markers --strict-config"
+xfail_strict = true
+# 见 BACKLOG.md：到 M4 引入 yfinance/pandas 之后，若上游的 DeprecationWarning
+# 把测试套弄红，**加定向条目**（"default::DeprecationWarning:yfinance.*"），
+# 不要把这里整体放松成非 error。
+filterwarnings = ["error"]
