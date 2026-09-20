@@ -421,11 +421,17 @@ def run_once(
     try:
         events_by_symbol, events_ok = _refresh_events(conn, cfg, symbols, session.date, budget)
     except (BudgetExceeded, RetryAfterTooLong) as exc:
-        # 全局护栏，不是「事件失败」—— §7.3.1 说这两种都记 partial。
+        # 全局护栏，不是「事件失败」。§7.3.1 对这两种的处置是
+        # **放弃这一跑**并记 partial —— 和价格阶段完全一样。
+        #
+        # 初版在这里 `events_by_symbol = {}` 然后继续跑完：那会把**每一个**
+        # 标的最新行的八个事件列写成 NULL，包括那些库里本来就有、
+        # 而且完全有效的事件 —— 用一次限流换掉了一批好数据。
+        # 「中止」和「把事件清空之后照常发布」不是一回事。
         conn.rollback()
-        events_by_symbol, events_ok = {}, True
         report.status = "partial"
-        report.note(f"事件阶段中止：{exc}")
+        report.note(f"事件阶段中止（预算/限流），本跑不写入：{exc}")
+        return report
     if not events_ok and report.status == "ok":
         report.status = "ok_events_stale"
         report.note("事件抓取失败，核心指标照常写入（§3.5(4)）")
