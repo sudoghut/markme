@@ -169,6 +169,8 @@ async function Dashboard() {
 
         <footer className="mt-10 border-t border-ink-800 pt-4 text-xs leading-relaxed text-zinc-600">
           <a href="/methodology" className="text-zinc-400 underline underline-offset-2">方法论与口径</a>
+          <span className="mx-2 text-zinc-700">·</span>
+          <a href="/states" className="text-zinc-400 underline underline-offset-2">非理想态演示</a>
           <p className="mt-2">{app.site.disclaimer}</p>
         </footer>
       </main>
