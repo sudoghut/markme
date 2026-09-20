@@ -243,6 +243,19 @@ class TestTheWholeWindowIsReranked:
         assert "write_from <= s.date <= session.date" in code, "整窗重排"
         assert "for day, rows in strength_by_day.items()" in code
 
+    def test_removed_sessions_have_their_ranking_rows_deleted(self) -> None:
+        """日历里消失的历史日，榜单行会变成**孤儿**。
+
+        基表里还在（于是 §9.3.2 那条「每个 strength_daily.date 都必须在
+        trading_sessions 里存在」会变红），而 ``v_strength_enriched`` 的
+        INNER join 里已经没有它 —— 一行公开的、永远对不上的历史数据。
+        """
+        from pipeline.run_daily import run_once
+
+        code = _code(run_once)
+        assert "revision.removed_historical" in code
+        assert "replace_strength(conn, gone, [])" in code
+
     def test_the_spec_table_says_the_same_range(self) -> None:
         """把依据钉在文档上 —— 这条约束将来最可能被当成「性能优化」删掉。"""
         from pathlib import Path
