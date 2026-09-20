@@ -87,6 +87,17 @@ class RunReport:
     def note(self, text: str) -> None:
         self.messages.append(text)
 
+    def escalate(self, status: RunStatus) -> None:
+        """只往「更坏」的方向改，且不覆盖已经是失败类的状态。
+
+        散在各处的 ``report.status = ...`` 很容易互相覆盖 ——
+        一个 partial 被后面一句写回 ok，或者反过来把 stale_vendor 降成 partial。
+        统一走这里。
+        """
+        rank = {"ok": 0, "ok_events_stale": 1, "partial": 2, "stale_vendor": 2, "failed": 3}
+        if rank.get(status, 0) > rank.get(self.status, 0):
+            self.status = status
+
     @property
     def message(self) -> str:
         return "；".join(self.messages)
@@ -251,12 +262,15 @@ def revalidate_site(report: RunReport) -> None:
     except urllib.error.HTTPError as e:
         status = e.code
     except Exception as exc:
-        report.status = "partial" if report.status == "ok" else report.status
+        report.escalate("partial")
         report.note(f"重验证请求失败：{exc}")
         return
 
     if status != 200:
-        report.status = "partial" if report.status == "ok" else report.status
+        # **从任何「成功类」状态升级，不只是从 ok。**
+        # 只认 ok 时，一次事件抓取失败（ok_events_stale）叠加一次重验证失败
+        # 会保持 exit 0 —— 而页面可能整整一小时停在旧内容上，无人知晓。
+        report.escalate("partial")
         report.note(
             f"重验证返回 {status}（不是 200）—— "
             "多半是 middleware 的 matcher 没排除 /api/*，请求被 307 到了 /login"
@@ -313,7 +327,7 @@ def run_once(
         # §9.1.4 第 5 条：「变更触发的重算记为 partial **而非静默进行**」。
         # 静默的后果很具体：ordinal 刚在这些标的脚下整体变过，而
         # strength_daily 的历史日期不在每日重写范围内 —— 没人被告知。
-        report.status = "partial"
+        report.escalate("partial")
         report.note(
             f"日历历史修订：{revision.describe()}；自 {revision.repair_from} 起，"
             "metrics/strength 需要一次有界重算（§9.1.4 第 3 条），请手动跑 backfill"
@@ -324,7 +338,7 @@ def run_once(
     # 2. 闸门 1 + 2
     gate = when_to_run(sessions, now, cfg.app.settle_minutes)
     if not gate.should_run and not force:
-        report.status = gate.decision  # type: ignore[assignment]
+        report.status = gate.decision  # type: ignore[assignment]  # 跳过类，直接赋值
         report.note(gate.reason)
         conn.rollback()
         return report
@@ -350,6 +364,17 @@ def run_once(
     if n_bars < cfg.app.lookback_bars:
         report.note(f"窗口只有 {n_bars} 根（要 {cfg.app.lookback_bars}）")
 
+    # §9.1.4 第 3 条的**有界修复**：历史日发生增减时，从最早变化点起重算。
+    #
+    # 只记 partial 然后让人「跑一次 backfill」是**无效的建议** ——
+    # backfill 走的是同一个 run_once，窗口同样被 lookback_bars 封顶。
+    # 修订点若早于那个窗口，trading_sessions 已经改了，而 metrics/strength
+    # 会无限期停在旧的 ordinal 上。所以这里真的把左端点前移。
+    repair_from = revision.repair_from if revision.needs_repair else None
+    if repair_from is not None and repair_from < start:
+        start = repair_from
+        report.note(f"修复窗口前移至 {start}（§9.1.4 第 3 条）")
+
     budget = RequestBudget(
         max_requests=cfg.app.max_requests_per_run,
         interval_seconds=(
@@ -363,23 +388,23 @@ def run_once(
         # §7.3.1 对这两件事的处置都是 **partial**，不是 failed：
         # 「超出即中止并记 partial」「放弃这一跑记 partial」。
         # 记 failed 会让它看起来像代码坏了，而它其实是一次礼让。
-        report.status = "partial"
+        report.escalate("partial")
         report.note(f"抓取中止：{exc}")
         conn.rollback()
         return report
     if outcome.degraded:
-        report.status = "partial"
+        report.escalate("partial")
         report.note(f"整窗降级到 Stooq：{', '.join(outcome.degraded)}")
     if outcome.missing:
-        report.status = "partial"
+        report.escalate("partial")
         report.note(f"两个源都没拿到：{', '.join(outcome.missing)}")
     if outcome.issues:
-        report.status = "partial"
+        report.escalate("partial")
         report.note("脏数据：" + "；".join(str(i) for i in outcome.issues[:5]))
     if outcome.rejected:
         # §7.2 闸门 4 的最后一句：「违反 → 该标的 partial，**不写毒数据**」。
         # fetch_window 已经把它们从 frame 里剔除了；这里只是把原因记下来。
-        report.status = "partial"
+        report.escalate("partial")
         diffs = ", ".join(
             f"{s}={outcome.cross_source_max_diff.get(s, float('nan')):.1%}"
             for s in outcome.rejected
@@ -399,10 +424,7 @@ def run_once(
     if lagging:
         bench = cfg.universe.benchmark
         # 已经是 partial 的话不要被覆盖回去（两者都 exit 1，但消息要留全）。
-        if bench in lagging:
-            report.status = "stale_vendor"
-        elif report.status == "ok":
-            report.status = "partial"
+        report.escalate("stale_vendor" if bench in lagging else "partial")
         report.note(f"bar 落后：{', '.join(lagging)}")
         prices = prices[~prices["symbol"].isin(lagging)].reset_index(drop=True)
 
@@ -417,8 +439,7 @@ def run_once(
         window_dates = [s.date for s in sessions if start <= s.date <= session.date]
         gaps = interior_gaps(bars, window_dates)
         if gaps:
-            if report.status == "ok":
-                report.status = "partial"
+            report.escalate("partial")
             report.note(
                 "窗口内有空洞：" + ", ".join(f"{s}缺{n}根" for s, n in sorted(gaps.items()))
             )
@@ -446,11 +467,11 @@ def run_once(
         # 而且完全有效的事件 —— 用一次限流换掉了一批好数据。
         # 「中止」和「把事件清空之后照常发布」不是一回事。
         conn.rollback()
-        report.status = "partial"
+        report.escalate("partial")
         report.note(f"事件阶段中止（预算/限流），本跑不写入：{exc}")
         return report
-    if not events_ok and report.status == "ok":
-        report.status = "ok_events_stale"
+    if not events_ok:
+        report.escalate("ok_events_stale")
         report.note("事件抓取失败，核心指标照常写入（§3.5(4)）")
 
     # 5. 计算（三层一起，§3.0 规则 2）
@@ -467,7 +488,15 @@ def run_once(
     # 否则昨天那行会成为它们的最新行，带着昨天的 alpha/beta 与八个事件列。
     metrics += _null_rows(sorted({*lagging, *outcome.rejected}), session.date, cfg)
     pool = {s.symbol: s.type for s in cfg.universe.symbols}
-    strength = compute_strength(cfg, metrics, day=session.date, pool=pool)
+    # 正常情况只重排当天；日历历史修订之后，**受影响区间的每一天都要重排** ——
+    # ordinal 刚在它们脚下整体变过，而「相邻 session」「20 个 session 前」
+    # 两个判断的答案都跟着变了（§9.1.4 第 3 条第 3 步）。
+    rerank_days = (
+        [s.date for s in sessions if repair_from <= s.date <= session.date]
+        if repair_from is not None
+        else [session.date]
+    )
+    strength_by_day = {d: compute_strength(cfg, metrics, day=d, pool=pool) for d in rerank_days}
 
     # 6. T2：一个原子单元
     existing = _existing_prices(conn, symbols, start, session.date)
@@ -482,7 +511,8 @@ def run_once(
         write_symbols(conn, symbol_rows(cfg))
         report.rows_prices = upsert_prices(conn, list(d.changed))
         report.rows_metrics = upsert_metrics(conn, metrics)
-        replace_strength(conn, session.date, strength)
+        for day, rows in strength_by_day.items():
+            replace_strength(conn, day, rows)
 
     report.note(
         f"价格 {report.rows_prices} 行（{d.unchanged} 行未变）、指标 {report.rows_metrics} 行"

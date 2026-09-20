@@ -136,6 +136,65 @@ class TestWriteContracts:
         assert "delete from symbols" not in src
 
 
+class TestStatusEscalation:
+    """散在各处的 ``report.status = ...`` 很容易互相覆盖。
+
+    codex 抓到的那一条就是这个形状：``revalidate_site`` 只认 ``ok``，
+    于是「事件失败 + 重验证失败」保持 exit 0 —— 页面可能整整一小时
+    停在旧内容上，而无人知晓。
+    """
+
+    def test_it_only_moves_towards_worse(self) -> None:
+        r = RunReport(status="partial")
+        r.escalate("ok")
+        assert r.status == "partial", "不能被降回去"
+        r.escalate("failed")
+        assert str(r.status) == "failed"
+
+    def test_events_stale_still_escalates_on_a_later_failure(self) -> None:
+        """**这就是那条 SERIOUS。**"""
+        r = RunReport(status="ok_events_stale")
+        r.escalate("partial")
+        assert r.status == "partial"
+        assert r.exit_code == 1, "必须告警"
+
+    def test_a_healthy_run_stays_healthy(self) -> None:
+        r = RunReport(status="ok")
+        r.escalate("ok")
+        assert r.status == "ok" and r.exit_code == 0
+
+    def test_stale_vendor_is_not_downgraded_to_partial(self) -> None:
+        r = RunReport(status="stale_vendor")
+        r.escalate("partial")
+        assert r.status == "stale_vendor", "同级不互相覆盖，消息都留在 messages 里"
+
+
+class TestCalendarRepairIsBounded:
+    """§9.1.4 第 3 条：历史日增减 → **从最早变化点起**完整修复。
+
+    只记 partial 然后建议「跑一次 backfill」是**无效的建议** ——
+    backfill 走的是同一个 run_once，窗口同样被 lookback_bars 封顶。
+    修订点若早于那个窗口，trading_sessions 已经改了，
+    而 metrics/strength 会无限期停在旧的 ordinal 上。
+    """
+
+    def test_the_window_is_extended_back_to_the_repair_point(self) -> None:
+        from pipeline.run_daily import run_once
+
+        code = _code(run_once)
+        assert "repair_from < start" in code, "必须把左端点前移"
+        assert "start = repair_from" in code
+
+    def test_every_affected_day_is_reranked(self) -> None:
+        """ordinal 刚在它们脚下整体变过，「相邻 session」「20 个 session 前」
+        两个判断的答案都跟着变了 —— 只重排当天是不够的。"""
+        from pipeline.run_daily import run_once
+
+        code = _code(run_once)
+        assert "rerank_days" in code
+        assert "for day, rows in strength_by_day.items()" in code
+
+
 class TestBudgetExhaustionAbandonsTheRun:
     """§7.3.1 对预算/限流耗尽的处置是**放弃这一跑**，两个阶段一视同仁。
 
