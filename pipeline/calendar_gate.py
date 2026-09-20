@@ -32,6 +32,7 @@ __all__ = [
     "ET",
     "GateDecision",
     "gate_opens_at",
+    "interior_gaps",
     "session_on_or_before",
     "stale_symbols",
     "when_to_run",
@@ -117,6 +118,34 @@ def when_to_run(
         opens_at=opens,
         reason=f"{today} 已收盘 {settle_minutes} 分钟以上",
     )
+
+
+def interior_gaps(
+    bars_by_symbol: Mapping[str, Sequence[date]],
+    sessions: Sequence[date],
+) -> dict[str, int]:
+    """闸门 3 的另一半：窗口**中间**缺了 bar 的标的，以及缺了几根。
+
+    ``stale_symbols`` 只看**最新**一根，于是一个内部空洞（某天限流、薄票、
+    供应商单日故障）完全过得了闸门 —— 而它的后果是安静的：
+    收益样本被悄悄缩短，alpha/beta 虽然会按日期对齐丢掉空洞两侧那两天，
+    却仍可能满足 ``min_obs`` 并给出一个看起来完全合理的数。
+
+    **只数「自己第一根之后」的空洞。** 历史本来就短（新加入的标的）不是缺口，
+    那种情况由 §3.3 的 ``provisional`` 灰标负责，而把它算成缺口会让那个标的
+    在补够历史之前每天都 partial —— 长期飘红的告警等于没有告警。
+    """
+    out: dict[str, int] = {}
+    for sym, bars in bars_by_symbol.items():
+        if not bars:
+            continue
+        have = set(bars)
+        first = min(have)
+        expected = [d for d in sessions if first <= d <= max(have)]
+        missing = len(expected) - len(have & set(expected))
+        if missing > 0:
+            out[sym] = missing
+    return out
 
 
 def stale_symbols(

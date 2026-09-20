@@ -16,6 +16,7 @@ import pytest
 from pipeline.calendar_gate import (
     ET,
     gate_opens_at,
+    interior_gaps,
     session_on_or_before,
     stale_symbols,
     when_to_run,
@@ -147,6 +148,43 @@ class TestGateThree:
     def test_the_result_is_sorted_for_stable_messages(self) -> None:
         latest = {s: self.DAY - timedelta(days=1) for s in ("MU", "AAPL", "NVDA")}
         assert stale_symbols(latest, self.DAY) == ("AAPL", "MU", "NVDA")
+
+
+class TestInteriorGaps:
+    """闸门 3 的**另一半**。
+
+    ``stale_symbols`` 只看最新一根，于是窗口中间的空洞完整地过掉闸门 ——
+    而后果是安静的：收益样本被悄悄缩短，alpha/beta 按日期对齐会丢掉空洞
+    两侧那两天，却仍可能满足 ``min_obs`` 并给出一个看起来完全合理的数。
+    """
+
+    SESSIONS: ClassVar[list[date]] = [date(2024, 6, d) for d in (3, 4, 5, 6, 7)]
+
+    def test_a_complete_window_has_no_gaps(self) -> None:
+        assert interior_gaps({"A": self.SESSIONS}, self.SESSIONS) == {}
+
+    def test_an_interior_hole_is_caught(self) -> None:
+        bars = [d for d in self.SESSIONS if d != date(2024, 6, 5)]
+        assert interior_gaps({"A": bars}, self.SESSIONS) == {"A": 1}
+
+    def test_several_holes_are_counted(self) -> None:
+        bars = [d for d in self.SESSIONS if d.day not in (4, 6)]
+        assert interior_gaps({"A": bars}, self.SESSIONS) == {"A": 2}
+
+    def test_a_short_history_is_not_a_gap(self) -> None:
+        """**历史本来就短不是缺口。**
+
+        新加入的标的由 §3.3 的 provisional 灰标负责；把它算成缺口会让它
+        在补够历史之前**每天都 partial** —— 而长期飘红的告警等于没有告警。
+        """
+        assert interior_gaps({"A": self.SESSIONS[2:]}, self.SESSIONS) == {}
+
+    def test_a_missing_tail_is_left_to_gate_three(self) -> None:
+        """末尾缺失是 ``stale_symbols`` 的职责，不在这里重复报。"""
+        assert interior_gaps({"A": self.SESSIONS[:3]}, self.SESSIONS) == {}
+
+    def test_an_empty_symbol_is_skipped(self) -> None:
+        assert interior_gaps({"A": []}, self.SESSIONS) == {}
 
 
 class TestSessionLookup:
