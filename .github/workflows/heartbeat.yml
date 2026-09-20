@@ -29,3 +29,29 @@ jobs:
           git add .heartbeat
           git commit -m "chore: heartbeat $(date -u +'%Y-%m')" || exit 0
           git push
+
+      # §9.4 的备份论证：**绝大部分数据都能从供应商重新推导**，所以影响低 ——
+      # 但这是一个值得讲出来的论证，而不是省略掉。
+      # 一个月度 pg_dump 近乎免费，买的是「供应商历史口径也一起变了」时的后悔药。
+      - uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
+        with:
+          enable-cache: true
+          python-version: '3.13'
+      - run: uv sync --locked
+      - name: pg_dump 备份
+        if: env.MARKME_DB_URL != ''
+        env:
+          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          mkdir -p /tmp/backup
+          pg_dump --no-owner --no-privileges --format=custom             --file="/tmp/backup/markme-$(date -u +'%Y-%m').dump" "$MARKME_DB_URL"
+          ls -la /tmp/backup
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: env.MARKME_DB_URL != ''
+        env:
+          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+        with:
+          name: pg_dump
+          path: /tmp/backup
+          retention-days: 90

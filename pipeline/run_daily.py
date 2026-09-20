@@ -67,7 +67,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅类型
     from pipeline.config import Config
     from pipeline.store import RunStatus
 
-__all__ = ["RunReport", "main", "run_once"]
+__all__ = ["RunReport", "main", "revalidate_site", "run_once"]
 
 
 @dataclass
@@ -222,6 +222,45 @@ def _refresh_events(
         {s: distances_for(evs, session_date) for s, evs in by_symbol.items()},
         ok,
     )
+
+
+def revalidate_site(report: RunReport) -> None:
+    """写库成功后请前端重新生成页面（§10.1）。
+
+    **必须断言响应是 200，非 200 升为 partial。**
+    middleware 的 matcher 若漏掉 `/api/*`，这个没有 cookie 的请求会拿到
+    **307 跳转到 /login** 而不是错误；把它当成功，就会出现：
+    管道报 ok、重验证从未发生、`REVALIDATE_TOKEN` 成了死重量、
+    页面退回 `revalidate = 3600` —— 恰好是 §10.1 特意设计掉的那个延迟，
+    **而且无从得知**。
+
+    没配 URL/token 时静默跳过：它是可选的，缺它不该让管道变红。
+    """
+    import urllib.error
+    import urllib.request
+
+    base = os.environ.get("SITE_URL", "").rstrip("/")
+    token = os.environ.get("REVALIDATE_TOKEN", "")
+    if not base or not token:
+        return
+    url = f"{base}/api/revalidate?token={token}"
+    try:
+        req = urllib.request.Request(url, data=b"", method="POST")  # noqa: S310
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        status = e.code
+    except Exception as exc:
+        report.status = "partial" if report.status == "ok" else report.status
+        report.note(f"重验证请求失败：{exc}")
+        return
+
+    if status != 200:
+        report.status = "partial" if report.status == "ok" else report.status
+        report.note(
+            f"重验证返回 {status}（不是 200）—— "
+            "多半是 middleware 的 matcher 没排除 /api/*，请求被 307 到了 /login"
+        )
 
 
 def _null_rows(symbols: Sequence[str], day: date, cfg: Config) -> list[dict[str, Any]]:
@@ -404,6 +443,10 @@ def run_once(
         f"价格 {report.rows_prices} 行（{d.unchanged} 行未变）、指标 {report.rows_metrics} 行"
     )
     report.note(f"请求 {budget.used}/{cfg.app.max_requests_per_run}")
+
+    # 写完了才重验证 —— 页面在管道写完几秒内更新，
+    # 而不是「什么都没发生之后一小时」。
+    revalidate_site(report)
     return report
 
 
