@@ -33,7 +33,7 @@ import pandas as pd
 
 from pipeline.metrics.events import Event as MetricEvent
 from pipeline.metrics.events import EventDistances, event_distances
-from pipeline.throttle import RequestBudget
+from pipeline.throttle import BudgetExceeded, RequestBudget, RetryAfterTooLong
 
 __all__ = [
     "EARNINGS_COVERAGE_DAYS",
@@ -152,6 +152,14 @@ def fetch_symbol_events(
 
         divs = budget.request(lambda: dividends_fn(symbol), what=f"{symbol} dividends")
         events += _from_dividends(symbol, divs)
+    except (BudgetExceeded, RetryAfterTooLong):
+        # **这两个不是「事件抓取失败」，是全局护栏。**
+        #
+        # §3.5(4) 豁免的是普通的端点失败（那记 ok_events_stale、exit 0、不告警），
+        # 而 §7.3.1 的请求预算是防「某个循环 bug 变成一场无意的压测」的硬上限。
+        # 把它吞进 ok=False，一次烧光 200 次预算的死循环就会产出一次**绿色运行**
+        # —— 正好是那条规则存在的全部理由。向上冒泡，由调用方记 partial。
+        raise
     except Exception as exc:
         return EventFetchOutcome(symbol=symbol, ok=False, error=f"{type(exc).__name__}: {exc}")
 

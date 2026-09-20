@@ -221,6 +221,28 @@ class TestFailureDoesNotTouchGoodData:
             assert out.error and "503" in out.error
             assert out.coverage == {}, "不 ok 就不该给出覆盖窗口 —— 调用方据此跳过删+插"
 
+    def test_budget_exhaustion_is_not_swallowed_as_an_event_failure(self) -> None:
+        """**预算耗尽不是「事件抓取失败」，是全局护栏。**
+
+        §3.5(4) 豁免的是普通端点失败（记 ok_events_stale、exit 0、不告警），
+        而 §7.3.1 的请求预算防的是「某个循环 bug 变成一场无意的压测」。
+        把它吞进 ok=False，一次烧光 200 次预算的死循环会产出一次**绿色运行**。
+        """
+        from pipeline.throttle import BudgetExceeded
+
+        b = _budget(max_requests=2)  # 三个端点，第三个必然撞上限
+
+        with pytest.raises(BudgetExceeded):
+            fetch_symbol_events(
+                "X",
+                today=TODAY,
+                sessions_start=SESSIONS_START,
+                budget=b,
+                calendar_fn=lambda s: {},
+                earnings_dates_fn=lambda s: [],
+                dividends_fn=lambda s: pd.Series(dtype="float64"),
+            )
+
     def test_an_empty_but_successful_fetch_still_carries_coverage(self) -> None:
         """**即便本次要插入 0 行，delete 也照常执行**（§3.5(1)）。
 
