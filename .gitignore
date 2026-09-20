@@ -1,0 +1,25 @@
+# 凭证 —— 绝不提交。仓库是 public 的，一旦泄露就是永久泄露。
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.vercel/
+
+# 杂项
+.DS_Store
+.review-prompt.txt

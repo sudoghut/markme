@@ -1,0 +1,72 @@
+# markme (market metrics) — 仓库约定
+
+本文件是**所有** coding agent 的契约（不限定哪一家）。`CLAUDE.md` 只有一行指向这里。
+
+## 目录约定
+
+| 位置 | 放什么 |
+|---|---|
+| 根目录 | `README.md`（项目说明 + 计划索引）、`AGENTS.md`、`LICENSE`、`BACKLOG.md` |
+| `docs/` | 所有计划 / 设计文档（**不放 README**） |
+| `docs/reviews/` | 每个里程碑的 review 闸门记录 `M<N>.md` |
+| `skills/` | 可复用的 agent skill（与具体 agent 无关，不放 `.claude/`） |
+| `config/` | 标的池与指标参数，见 `docs/create-project.md` §6 |
+
+## 计划文档
+
+- 所有计划 / 设计文档放在 **`docs/`**，不放仓库根目录。
+- **每份计划必须有一个说明其内容的具体文件名**，禁止 `workplan.md` / `plan.md`
+  这类通用名。小写 kebab-case，例如 `create-project.md`、`add-sector-metrics.md`。
+- 新增计划后，在**根目录 `README.md`** 的「计划文档清单」表里登记一行。
+  索引留在根 README，`docs/` 下不放 README。
+- 当前的总体建设计划：[`docs/create-project.md`](docs/create-project.md)。
+
+## Skills
+
+- 写 skill 一律放在仓库根目录的 **`skills/<skill-name>/`**，用通用的
+  `SKILL.md` + 前置元数据格式，**不要**放进 `.claude/skills/` 或任何
+  绑定某一家 agent 的目录 —— 未来不一定是同一个 agent 来执行。
+- skill 内部不要硬编码某个 agent 专有的工具名或路径。
+
+## 每个里程碑的 review 闸门（强制）
+
+完成任一小环节后，必须依次通过两道闸门才能推进下一环节：
+
+1. **闸门 A — review agent（并行多组）**：派 2–3 个 review agent 读代码 / 读 diff
+   并行审查（正确性 / 安全与配置 / 简化与一致性）。修完所有 **serious issues**，
+   重跑到干净为止；nice-to-have 记进 `BACKLOG.md`，不阻塞。
+2. **闸门 B — codex CLI**（外部终端命令，不是内部 subagent，保证独立性）：
+
+   ```powershell
+   powershell.exe -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PROXY='http://127.0.0.1:7890'; Write-Output '<prompt>' | codex exec --dangerously-bypass-approvals-and-sandbox"
+   ```
+
+   - `codex exec --dangerously-bypass-approvals-and-sandbox`：非交互 + 跳过沙盒审批。
+   - `Write-Output "..." |`：用管道喂 prompt，否则 `codex exec` 会一直等 stdin。
+   - 必须显式设 `HTTPS_PROXY` / `HTTP_PROXY`：Node.js 不读 Windows 注册表的代理设置。
+   - 用 `powershell.exe`（带 `.exe`），裸 `powershell` 在这台机器上可能解析不到。
+   - 同样修完所有 serious issues，重跑到干净为止。
+
+每个里程碑在 `docs/reviews/M<N>.md` 留一份「发现 → 处置（已修 / 记入 backlog /
+判定为误报及理由）」的小结。
+
+> 实战经验（v1→v3 的 10 轮）：**闸门 B 抓到的 serious，多数是闸门 A 的修复
+> 自己引入的回归。** 所以「修完就走」不行，必须重跑到干净为止。
+
+## Git 工作流
+
+**两道闸门都干净之后**才进入 git 流程，顺序固定：
+
+1. 在里程碑分支上 `commit`（说清楚做了什么、为什么）
+2. 开 `PR`（描述里带本轮 review 结论与 `docs/reviews/M<N>.md` 链接）
+3. **`rebase merge`** —— 不是 merge commit，不是 squash。**`git log` 必须保持线性。**
+4. 删掉已合并的分支
+
+- 分支命名对应 §11 的里程碑：`m0-scaffold`、`m1-config`、`m2-metrics` …
+- **不直接推 `main`**，所有改动走分支 + PR。
+- 冲突用 `rebase` 解决，不用 `merge` —— 线性是硬要求。
+
+## 独立性
+
+本项目与 `../low-buy` **完全独立**：不 import、不共享数据目录、不依赖其运行环境。
+唯一共享的是标的清单这一份事实，且已硬拷贝进 `config/universe.yaml`。
