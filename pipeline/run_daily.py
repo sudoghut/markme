@@ -56,9 +56,10 @@ from pipeline.store import (
 )
 from pipeline.sync_sessions import sync_sessions
 from pipeline.sync_symbols import symbol_rows
-from pipeline.throttle import RequestBudget
+from pipeline.throttle import BudgetExceeded, RequestBudget, RetryAfterTooLong
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型
+    from collections.abc import Sequence
     from datetime import date
 
     import psycopg
@@ -75,6 +76,8 @@ class RunReport:
     messages: list[str] = field(default_factory=list)
     rows_prices: int = 0
     rows_metrics: int = 0
+    #: 这一跑实际使用的 session 日期。``main`` 用它把 ``runs`` 那一行对齐。
+    session_date: date | None = None
 
     @property
     def exit_code(self) -> int:
@@ -221,6 +224,29 @@ def _refresh_events(
     )
 
 
+def _null_rows(symbols: Sequence[str], day: date, cfg: Config) -> list[dict[str, Any]]:
+    """给闸门 3 排除掉的标的补一行**全 NULL** 的最新行（§7.2 闸门 3）。"""
+    from pipeline.compute import EVENT_COLUMNS
+    from pipeline.store import METRICS_WRITE_COLUMNS
+
+    rows: list[dict[str, Any]] = []
+    for sym in symbols:
+        row: dict[str, Any] = dict.fromkeys(METRICS_WRITE_COLUMNS)
+        row |= {
+            "symbol": sym,
+            "date": day,
+            "extra": {},
+            # 整行没有值，所以每个有软闸门的指标都算「信不过」。
+            "provisional_metrics": sorted(
+                m.id for m in cfg.metrics.metrics if m.provisional_below is not None
+            ),
+        }
+        for col in EVENT_COLUMNS:
+            row[col] = None
+        rows.append(row)
+    return rows
+
+
 def run_once(
     conn: psycopg.Connection[Any],
     cfg: Config,
@@ -232,11 +258,25 @@ def run_once(
     """跑一次。``now`` 可注入 —— §11 M5 的冻结时钟测试押在这上面。"""
     report = RunReport(status="ok")
 
-    # 1. 同步日历（必须在闸门之前 —— 闸门读的就是这张表）
+    # 1. 同步日历（必须在闸门之前 —— 闸门读的就是这张表）。
+    #
+    # **不在这里 commit。** 闸门读的是下面返回的内存列表，不是那张表，
+    # 所以没有任何东西需要它先落地；而提前提交的代价是真实的：
+    # 一次以 failed 收场的运行，也已经永久改写了 trading_sessions 的
+    # ordinal —— 包括在一次历史修订里**删掉**某些 strength_daily 还在
+    # 引用的日期，于是那些行从 v_strength_enriched 的 INNER join 里
+    # 无声消失、days_in_top_n 从头数起（§9.1.4 那段加框的警告）。
+    # trading_sessions 是 T2 所写指标的输入，它属于同一个原子单元。
     sessions, revision = sync_sessions(conn, cfg, now.astimezone(ET).date())
-    conn.commit()
     if revision.needs_repair:
-        report.note(f"日历修订：{revision.describe()}，自 {revision.repair_from} 起需重算")
+        # §9.1.4 第 5 条：「变更触发的重算记为 partial **而非静默进行**」。
+        # 静默的后果很具体：ordinal 刚在这些标的脚下整体变过，而
+        # strength_daily 的历史日期不在每日重写范围内 —— 没人被告知。
+        report.status = "partial"
+        report.note(
+            f"日历历史修订：{revision.describe()}；自 {revision.repair_from} 起，"
+            "metrics/strength 需要一次有界重算（§9.1.4 第 3 条），请手动跑 backfill"
+        )
     elif revision.added_future:
         report.note(revision.describe())
 
@@ -245,16 +285,23 @@ def run_once(
     if not gate.should_run and not force:
         report.status = gate.decision  # type: ignore[assignment]
         report.note(gate.reason)
+        conn.rollback()
         return report
     session = gate.session or max(
         (s for s in sessions if s.date <= now.astimezone(ET).date()),
         key=lambda s: s.ordinal,
     )
 
+    report.session_date = session.date
     if not force and _already_done(conn, session.date):
         report.status = "skipped_already_done"
         report.note(f"{session.date} 已有成功记录，跳过（§7.1 条件重试）")
+        conn.rollback()  # 连 sessions 的写一起丢掉：这一跑什么都不做
         return report
+    # **把这次读打开的事务放掉。** 下面的整窗抓取按 §7.3.1 设计就要跑
+    # 5–10 分钟，挂着一个 idle-in-transaction 的连接会挡住 vacuum，
+    # 而且正是 pooler 的空闲事务杀手最爱的形状 —— 被杀的表现是
+    # 一次健康运行报 failed。
 
     # 3. 抓取整窗（§3.0 规则 2）
     symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
@@ -269,7 +316,16 @@ def run_once(
         ),
         retry_max_attempts=cfg.app.retry_max_attempts,
     )
-    outcome = fetch_window(symbols, start, session.date, budget)
+    try:
+        outcome = fetch_window(symbols, start, session.date, budget)
+    except (BudgetExceeded, RetryAfterTooLong) as exc:
+        # §7.3.1 对这两件事的处置都是 **partial**，不是 failed：
+        # 「超出即中止并记 partial」「放弃这一跑记 partial」。
+        # 记 failed 会让它看起来像代码坏了，而它其实是一次礼让。
+        report.status = "partial"
+        report.note(f"抓取中止：{exc}")
+        conn.rollback()
+        return report
     if outcome.degraded:
         report.status = "partial"
         report.note(f"整窗降级到 Stooq：{', '.join(outcome.degraded)}")
@@ -284,6 +340,7 @@ def run_once(
     if prices.empty:
         report.status = "failed"
         report.note("窗口内没有任何价格行")
+        conn.rollback()
         return report
 
     # 4. 闸门 3：**逐标的**最新 bar 日期 == 当日 session
@@ -291,9 +348,24 @@ def run_once(
     lagging = stale_symbols({s: latest.get(s) for s in symbols}, session.date)
     if lagging:
         bench = cfg.universe.benchmark
-        report.status = "stale_vendor" if bench in lagging else "partial"
+        # 已经是 partial 的话不要被覆盖回去（两者都 exit 1，但消息要留全）。
+        if bench in lagging:
+            report.status = "stale_vendor"
+        elif report.status == "ok":
+            report.status = "partial"
         report.note(f"bar 落后：{', '.join(lagging)}")
         prices = prices[~prices["symbol"].isin(lagging)].reset_index(drop=True)
+
+    if prices.empty:
+        # **过滤之后要再查一次。** 上面那次检查在过滤之前。
+        # 供应商全线故障 + 一次 --force 重跑时，T2 照样会执行，
+        # 而 replace_strength 会先 `delete from strength_daily where date = ?`
+        # 再插 0 行 —— **当天的榜单被静默删掉**，
+        # 而 §7.2 承诺的是「重跑、补跑…结果都一样」。
+        report.status = "stale_vendor"
+        report.note("闸门 3 之后没有任何可用标的，跳过写入（不动已有数据）")
+        conn.rollback()
+        return report
 
     # 4b. 事件（§3.5）。**失败不得惊动主管道** —— 见下面的 ok_events_stale。
     events_by_symbol, events_ok = _refresh_events(conn, cfg, symbols, session.date, budget)
@@ -307,6 +379,11 @@ def run_once(
     metrics = compute_metrics(
         cfg, windows, event_distances=events_by_symbol, latest_date=session.date
     )
+    # §7.2 闸门 3 的原话是「该标的**指标写 NULL**」—— 不是「不写」。
+    # 不写的话，昨天那一行会成为这个标的的最新行，而它带着昨天的
+    # alpha/beta **和八个事件列**；于是 §3.5(3) 的「历史行事件列必须全为 NULL」
+    # 那条不变式会在任何一个标的落后的当天变红。
+    metrics += _null_rows(lagging, session.date, cfg)
     pool = {s.symbol: s.type for s in cfg.universe.symbols}
     strength = compute_strength(cfg, metrics, day=session.date, pool=pool)
 
@@ -342,8 +419,11 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config()
     now = datetime.now(tz=ET)
     with connect(dsn) as conn:
-        session_date = now.date()
-        run_id = start_run(conn, session_date, os.environ.get("GITHUB_SHA"))
+        # **runs.session_date 必须和数据用的是同一天。**
+        # 先用 now.date() 开 run、再让 run_once 自己去挑 session，两者在
+        # 任何 --force / 周末 dispatch（以及每一次 backfill）下都会分叉，
+        # 而 _already_done 查的是后者 —— 它去找的那一行不是 start_run 写的那行。
+        run_id = start_run(conn, now.date(), os.environ.get("GITHUB_SHA"))
         try:
             report = run_once(conn, cfg, now=now, force=force, backfill=backfill)
         except Exception as exc:
@@ -355,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
             conn,
             run_id,
             report.status,
+            session_date=report.session_date,
             rows_prices=report.rows_prices,
             rows_metrics=report.rows_metrics,
             message=report.message,

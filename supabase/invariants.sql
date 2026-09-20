@@ -429,6 +429,23 @@ where s.score_metric = 'mom_20'
   )
   and s.rank <> r.recomputed;
 
+-- name: 不得有久悬未决的 running 运行记录
+--
+-- §9.1.2 把「崩溃落在 T2 中间 → runs 里留下一行永远停在 running」称作
+-- **这正是我们想要的信号**：下一跑看到它即可判定上一跑硬崩。
+--
+-- 但那个信号此前**没有任何消费者**：`_already_done` 只匹配 ok / ok_events_stale，
+-- 本文件一条 runs 断言都没有，别处也不读 private.runs。
+-- 而 daily.yml 有 `timeout-minutes: 30` —— 超时被杀时写下的，
+-- 恰恰是那一行没人看的记录。
+--
+-- 2 小时：整跑按 §7.3.1 的设计是 5–10 分钟，而 workflow 上限是 30 分钟，
+-- 取一个宽裕到不可能误报、又短到当天就能发现的数。
+select 'run ' || id::text || ' 自 ' || started_at::text || ' 起一直是 running' as violation
+from private.runs
+where status = 'running'
+  and started_at < now() - interval '2 hours';
+
 -- name: 至少一只分红股的某个 yfinance 历史行满足 close != adj_close
 --
 -- §3.0 规则 4 的探测器：新版 yfinance 默认 auto_adjust=True，此时返回的

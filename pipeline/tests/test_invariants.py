@@ -25,7 +25,7 @@ from pipeline.sqltext import mask
 #: **这是一个刻意的硬编码。** 它要挡住的是「少了一条断言」这种没有任何症状
 #: 的损坏：把 `-- name:` 打错一个字母，那条断言会被**并进上一条**的 SQL 里
 #: 变成注释，跑起来依旧 0 行、依旧全绿。改这个数字应当是一次自觉的动作。
-EXPECTED_ASSERTIONS = 18
+EXPECTED_ASSERTIONS = 19
 
 
 class TestTheRealFile:

@@ -179,16 +179,23 @@ def finish_run(
     run_id: int,
     status: RunStatus,
     *,
+    session_date: date | None = None,
     rows_prices: int | None = None,
     rows_metrics: int | None = None,
     message: str | None = None,
 ) -> None:
-    """T3：写终态并提交。``runs`` **只追加和改终态，从不删除**。"""
+    """T3：写终态并提交。``runs`` **只追加和改终态，从不删除**。
+
+    ``session_date`` 用来把这一行对齐到**实际使用的**交易日 ——
+    T1 开跑时还不知道那是哪天（闸门还没判），而 ``--force`` / 周末 dispatch
+    下「今天」与「这一跑写的那个 session」并不是同一天。
+    """
     with conn.cursor() as cur:
         cur.execute(
             "update private.runs set status = %s, finished_at = now(), "
+            "session_date = coalesce(%s, session_date), "
             "rows_prices = %s, rows_metrics = %s, message = %s where id = %s",
-            (status, rows_prices, rows_metrics, _truncate(message), run_id),
+            (status, session_date, rows_prices, rows_metrics, _truncate(message), run_id),
         )
     conn.commit()
 

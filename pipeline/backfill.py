@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
             conn,
             run_id,
             report.status,
+            session_date=report.session_date,
             rows_prices=report.rows_prices,
             rows_metrics=report.rows_metrics,
             message="backfill: " + report.message,
