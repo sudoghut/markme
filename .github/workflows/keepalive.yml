@@ -39,3 +39,25 @@ jobs:
           SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
           SUPABASE_TESTS_REQUIRED: '1'
         run: uv run pytest -q pipeline/tests/test_db_integration.py
+      - name: 站点健康检查（§10.6 的状态码那一半）
+        # **这一步才是「正确 HTTP 状态码」真正被用上的地方。**
+        #
+        # 页面本身做不了这件事：实测页面级 ISR 和 fetch 的 Data Cache
+        # **都是** stale-while-revalidate —— 数据源死掉之后，访客拿到的
+        # 一直是 200 + 缓存里的旧页面，抛出去的异常被吞成一行日志。
+        # 见 web/app/api/health/route.ts 的文件头。
+        #
+        # /api/health 不带缓存，每次都真读一行。它同时覆盖两件事：
+        # 数据库不可达，以及 §9.3 的 GRANT/RLS 被人在 Dashboard 里改掉
+        # （那会长成 401/403）—— 后者正是 §12 #9 第 4 条点名的场景，
+        # 而它恰恰不会让任何 workflow 变红，除非有人去看。
+        #
+        # 没配 SITE_URL 就跳过：它是可选的，缺它不该让这个 job 变红。
+        if: env.SITE_URL != ''
+        env:
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 30 "$SITE_URL/api/health")
+          cat /tmp/health.json
+          echo
+          test "$code" = "200"

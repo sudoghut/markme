@@ -8,44 +8,52 @@
  */
 import { PoolTable, type Row } from "@/components/PoolTable";
 import { TopThree } from "@/components/TopThree";
-import {
-  DataUnavailableError,
-  EmptyDatabase,
-  StaleBanner,
-  UnavailableNotice,
-  failClosed,
-} from "@/components/States";
+import { EmptyDatabase, StaleBanner, failClosed } from "@/components/States";
 import { app, metrics as metricSpecs, strength, universe } from "@/lib/config";
 import { rest, type MetricRow, type PriceRow, type StrengthRow, type SymbolRow } from "@/lib/supabase";
 
-export const revalidate = 3600;
-
 /**
- * **构建期没有 HTTP 响应，也就没有状态码可设。**
+ * **页面按请求渲染，缓存放在 `fetch` 那一层。**
  *
- * 页面走 ISR，所以 `next build` 会预渲染它一次。而数据源不可达时
- * `failClosed` 是要**抛**的（那是拿到非 200 的唯一办法），
- * 预渲染期抛出去的结果是**构建失败**，不是一个 500 —— 而 CI 恰恰是
- * 不给凭证地构建，用来验「数据暂不可用」这个态真的实现了（§12 #9 第 4 条）。
+ * 初版是页面级 ISR（`export const revalidate = 3600`）。实测证明那样在最常见的
+ * 故障里比什么都不做更糟：把数据源杀掉、ISR 条目是热的，然后连打三次 ——
+ * 三次都是 **200 + 故障前的价格 + 没有陈旧黄条**。Next 的 response cache 在条目
+ * 过期且非 on-demand 时先把**旧页面**返给访客再去后台重生成，后台那次一抛就被
+ * 吞成一行 `console.error`，旧条目留在缓存里继续发。**永远不会自愈** ——
+ * `sessionsBehind` 是生成那一刻算出来的 `1`，于是黄条被 `<= 1` 永久藏起来，
+ * 页面会一直宣称自己是最新的。
  *
- * 两者不矛盾，只是分属两个时刻：构建期渲染这个态，运行期抛。
+ * 改成按请求渲染之后：
+ *
+ * - **陈旧天数每次重算**，不会被冻住。`sessions` 的查询 URL 里带着
+ *   `todayISO()`，所以每跨一天缓存键就变，不可能永远命中旧答案。
+ * - 一份缓存都没有时（冷启动、部署后第一次访问）照样 `failClosed` → **500**。
+ * - **出站流量仍然接近零**（§10.1）：每个 `fetch` 都带 `next: { revalidate }`，
+ *   命中的是 **Data Cache**。实测一次构建打数据源 **0 次**，
+ *   连续 5 次请求累计只打 **6 次**（就是首次那 6 个读）。页面动态了，数据没有。
+ * - 按需重验证（§10.1）照旧：`revalidatePath("/")` 清的就是这层 Data Cache。
+ *
+ * **但状态码这件事不在这里。** Data Cache 同样是 stale-while-revalidate：
+ * 实测让数据源改口 111.11 → 222.22，过期后第一次请求拿到的仍是 111.11，
+ * 把源杀掉再过期拿到的是 222.22 —— 错误一样被吞，一样是 200。
+ * 而那其实是**对的**：缓存里的数字是真的，「数据截至 <date>」也是真的，
+ * 页面这一刻并没有撒谎，硬改成 500 才是撒谎。
+ * 会撒谎的是「监控看到一串 200 就以为管道活着」，所以状态码归给
+ * `/api/health` —— 一个不带缓存、能真正设状态码的 Route Handler。
+ *
+ * 代价是丢掉整页的 CDN 边缘缓存。对一个加了密码门、单人使用的看板，
+ * 换来「陈旧黄条永远说真话」是划算的。
  */
-const PRERENDERING = process.env.NEXT_PHASE === "phase-production-build";
-
-export default async function Page() {
-  try {
-    return await Dashboard();
-  } catch (e) {
-    if (PRERENDERING && e instanceof DataUnavailableError) return <UnavailableNotice />;
-    throw e;
-  }
-}
+export const dynamic = "force-dynamic";
+// `force-dynamic` 历史上会把 fetch 连带设成 no-store。显式声明，
+// 免得上游默认值一变，出站流量就从「接近零」变成「每次请求全量」。
+export const fetchCache = "default-cache";
 
 function daysBetween(a: string, b: string): number {
   return Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000);
 }
 
-async function Dashboard() {
+export default async function Dashboard() {
   const R = app.revalidate_seconds;
 
   const symbols = await rest<SymbolRow>("symbols?select=symbol,name,type,enabled&enabled=eq.true&order=symbol", R);

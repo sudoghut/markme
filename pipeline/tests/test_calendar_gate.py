@@ -17,6 +17,7 @@ from pipeline.calendar_gate import (
     ET,
     gate_opens_at,
     interior_gaps,
+    last_settled_session,
     session_on_or_before,
     stale_symbols,
     when_to_run,
@@ -200,3 +201,57 @@ class TestSessionLookup:
 
     def test_before_everything_is_none(self) -> None:
         assert session_on_or_before(self.SESSIONS, date(2020, 1, 1)) is None
+
+
+class TestLastSettledSession:
+    """**修复跑不能用今天那根 bar。**
+
+    日历历史修订会把闸门 1/2 顶开（§9.1.4），而 ``when_to_run`` 在
+    ``skipped_too_early`` 分支里返回的 ``session`` 是**今天** ——
+    它是给「还要等到几点」那条消息用的，不是「该算哪一天」的答案。
+    直接拿它去抓，16:00 ET 那条 cron 上就是敲钟那一刻的价。
+
+    这一组是**行为测试**。修复路径此前只有源码 grep 断言
+    （``assert "write_from < start" in code``），而 grep 抓不到
+    「session 取错了哪一天」—— 这正是这个 bug 活下来的原因。
+    """
+
+    SESSIONS: ClassVar[list[Session]] = [
+        _s("2024-06-11", ordinal=1),
+        _s("2024-06-12", ordinal=2),
+        _s("2024-07-03", close=time(13, 0), ordinal=3),  # 半日市
+        _s("2024-07-05", ordinal=4),
+    ]
+
+    def test_before_settle_it_falls_back_to_the_previous_day(self) -> None:
+        """16:00 ET 敲钟那一刻：今天还没定稿，答案必须是**昨天**。"""
+        got = last_settled_session(self.SESSIONS, _et("2024-06-12", 16, 0), SETTLE)
+        assert got.date == date(2024, 6, 11)
+
+    def test_intraday_never_returns_today(self) -> None:
+        """手动 dispatch 撞上 needs_repair 的最坏情况：11:00 ET 盘中。"""
+        got = last_settled_session(self.SESSIONS, _et("2024-06-12", 11, 0), SETTLE)
+        assert got.date == date(2024, 6, 11)
+
+    def test_after_settle_today_is_allowed(self) -> None:
+        got = last_settled_session(self.SESSIONS, _et("2024-06-12", 17, 1), SETTLE)
+        assert got.date == date(2024, 6, 12)
+
+    def test_half_day_settles_early(self) -> None:
+        """半日市 13:00 收盘 → 14:00 就定稿了，不必等到 17:00。"""
+        got = last_settled_session(self.SESSIONS, _et("2024-07-03", 14, 1), SETTLE)
+        assert got.date == date(2024, 7, 3)
+
+    def test_half_day_is_still_unsettled_at_13_30(self) -> None:
+        got = last_settled_session(self.SESSIONS, _et("2024-07-03", 13, 30), SETTLE)
+        assert got.date == date(2024, 6, 12)
+
+    def test_a_non_session_day_falls_back_to_the_last_one(self) -> None:
+        """周末/假日：没有今天，答案是上一个交易日。"""
+        got = last_settled_session(self.SESSIONS, _et("2024-07-04", 10, 0), SETTLE)
+        assert got.date == date(2024, 7, 3)
+
+    def test_it_raises_rather_than_inventing_a_session(self) -> None:
+        """一个都没定稿时**抛**，不要返回一个编出来的日期。"""
+        with pytest.raises(ValueError, match="没有任何已定稿"):
+            last_settled_session(self.SESSIONS, _et("2024-06-11", 9, 0), SETTLE)

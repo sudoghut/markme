@@ -120,6 +120,39 @@ def when_to_run(
     )
 
 
+def last_settled_session(
+    sessions: Sequence[Session],
+    now: datetime,
+    settle_minutes: int,
+) -> Session:
+    """最后一个**已经过了 settle_minutes** 的 session。
+
+    这个函数只为一件事存在：**修复跑不能用今天那根 bar。**
+
+    ``when_to_run`` 在 ``skipped_too_early`` 分支里返回的 ``session`` 是**今天** ——
+    它是给「还要等到几点」那条消息用的，不是「该算哪一天」的答案。
+    而日历历史修订会把闸门顶开（§9.1.4），于是一次**自动触发**的修复
+    会拿着这个「今天」去抓一根还没定稿的 bar：
+    ``daily.yml`` 的 16:00 ET 那条 cron 上就是敲钟那一刻的价，
+    手动 dispatch 可以是盘中价。
+
+    两道后闸门都拦不住它：闸门 3 比的是日期相等（日期就是今天，通过），
+    闸门 4 的阈值是 50% 日内波动与 2% 跨源差（preliminary 与 consolidated
+    的差是千分位，通过）。写进去的正是 ``daily.yml`` 文件头那句
+    「**宁可晚一小时，不要一个会变的数字**」要防的东西。
+
+    修复需要的只是历史窗口，根本不需要今天那根。
+    """
+    now_et = now.astimezone(ET)
+    today = now_et.date()
+    settled = [
+        s for s in sessions if s.date <= today and gate_opens_at(s, settle_minutes) <= now_et
+    ]
+    if not settled:
+        raise ValueError(f"{today} 之前没有任何已定稿的 session（settle={settle_minutes} 分钟）")
+    return max(settled, key=lambda s: s.ordinal)
+
+
 def interior_gaps(
     bars_by_symbol: Mapping[str, Sequence[date]],
     sessions: Sequence[date],

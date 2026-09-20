@@ -15,11 +15,27 @@ async function hmac(secret: string): Promise<string> {
     .join("");
 }
 
+/**
+ * `next` 只接受**站内**路径。
+ *
+ * `new URL(next, req.url)` 对 `https://evil.com` 和 `//evil.com` 都会解析成
+ * 外站绝对地址，于是 `/login?next=https://evil.com` 在**登录成功之后**
+ * 把人弹到外站 —— 一个挂在自家域名下的开放重定向。
+ * 触发它要先知道口令，所以危害有限；但这是一行的事，而且这段代码
+ * 就是别人会照着抄的那种。
+ */
+function safeNext(raw: FormDataEntryValue | null): string {
+  const v = String(raw ?? "");
+  // 以单个 `/` 开头才算站内：`//host` 和 `/\host` 都是协议相对地址。
+  if (!v.startsWith("/") || v.startsWith("//") || v.startsWith("/\\")) return "/";
+  return v;
+}
+
 export async function POST(req: Request) {
   const password = process.env.SITE_PASSWORD;
   const form = await req.formData();
   const given = String(form.get("password") ?? "");
-  const next = String(form.get("next") ?? "/") || "/";
+  const next = safeNext(form.get("next"));
 
   if (!password || given !== password) {
     return NextResponse.redirect(new URL(`/login?e=1&next=${encodeURIComponent(next)}`, req.url), 303);
