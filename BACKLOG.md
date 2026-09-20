@@ -56,6 +56,22 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 - **`.gitattributes` 的二进制类型表**已预置常见前端资源（woff2/ico/webp），
   新增其他类型时记得补，否则 `* text=auto eol=lf` 会去归一化二进制文件。
 
+### 第十轮复核的残留取舍
+
+- **数据源不可达时的响应体是客户端渲染的。** 实测：抛异常 → HTTP **500**，
+  响应体是 Next 的 `__next_error__` 文档，preload 了 `app/error-*.js` 并带 digest，
+  浏览器水合后才渲染出「数据暂不可用」。也就是说 `curl` 或关掉 JS 会拿到一个
+  **空的 500**。§10.6 的两个要求（有状态码、不是白屏）在 App Router 里
+  不能同时做到 —— Server Component 拿不到 response 对象。
+  当前选了「状态码正确 + 正文靠水合」，因为看不见的是监控而不是人。
+  想两个都要，得把 `/` 改成 Route Handler 自己吐 HTML，那会丢掉 RSC 与 ISR。
+
+- **状态码是 500 而不是 503。** 同一个限制。真要区分，得等 `authInterrupts`
+  （`forbidden()` / `unauthorized()`）稳定，那组 API 能服务端渲染出 403/401。
+
+- **Lighthouse ≥ 95 尚未实测**（§11 M7 验收）。预览部署挂在 Vercel 的
+  SSO 保护后面，跑不了外部审计；要在**生产** URL 上跑一次。
+
 ## 随时
 
 - **Action 的 SHA 钉版本会腐烂。** `actions/checkout` v4.2.2（2024-10）与
@@ -64,6 +80,12 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 - **`requires-python = ">=3.13"`。** 设计文档 §14 写的是 Python 3.12。
   已收紧到 3.13 与本机、CI、`uv.lock` 的解析标记一致 ——
   声明一个从来没被测过的 3.12 支持，是一句没人验证的承诺。
+- **`sharp` 的 libvips/libheif 漏洞**（`npm audit` 高危）。它是 Next 的
+  可选依赖，本站**不用 `next/image`**，所以不在实际路径上。
+  Next 自己钉的版本，只能等上游升。
+- **Next 15.x 仍带着有漏洞的 `postcss`**（`npm audit` 说要升到 16.x 才干净）。
+  那是构建期依赖，输入是我们自己仓库里的 CSS。升 Next 16 是一次单独的动作，
+  不塞进这个 PR。
 
 ## M6（前端）开始时第一件事 —— ~~已还~~
 
@@ -72,38 +94,3 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   `REVALIDATE_TOKEN` 都已加回，值一律写成占位符 ——
   真值从本地 `.env` 读。
 
-## M6 / M7（前端）之前
-
-- **`dim_when` 需要一个 TypeScript 孪生实现。** §6.1 说前端用 js-yaml 直接读 YAML，
-  所以 `DimExpr.evaluate` 的语义要在前端重写一遍。**两份实现就是两个要对齐的地方**，
-  所以务必对齐这几条而不只是比较运算：
-  - Kleene 三值 `and` / `or`（`False and NULL` → False，`NULL and True` → NULL）
-  - `null` / `NaN` / **`Infinity`** / 非数值 一律 → 打灰（fail closed）
-  - 求值期绝不抛异常
-  - 根节点必须是比较或布尔运算
-
-
-- **`.gitattributes` 的二进制类型表**已预置常见前端资源（woff2/ico/webp），
-  新增其他类型时记得补，否则 `* text=auto eol=lf` 会去归一化二进制文件。
-
-## 随时
-
-- **Action 的 SHA 钉版本会腐烂。** `actions/checkout` v4.2.2（2024-10）与
-  `setup-uv` v5.3.1（2025-02）都已偏旧，且跑在 node20 runtime 上。
-  已加 `.github/dependabot.yml` 的 `github-actions` 生态来产生更新信号。
-- **`requires-python = ">=3.13"`。** 设计文档 §14 写的是 Python 3.12。
-  已收紧到 3.13 与本机、CI、`uv.lock` 的解析标记一致 ——
-  声明一个从来没被测过的 3.12 支持，是一句没人验证的承诺。
-
-## M6（前端）开始时第一件事
-
-- **把 Vercel 的键位加回 `.env.example`**（M3 期间临时撤出，以免混进数据库那次提交）：
-  ```
-  VERCEL_TOKEN=<your-vercel-token>
-  VERCEL_ORG_ID=
-  VERCEL_PROJECT_ID=
-  ```
-  本地 `.env` 里这三个已经填好 —— **值从 `.env` 读，不要往这里抄**：
-  这份文件在公开仓库里，而 team / project id 与 team 名都是账号结构的信息，
-  不该因为「它不算 secret」就顺手公开。新建的 Vercel 项目要落在
-  `.env` 里 `VERCEL_ORG_ID` 指向的那个 team 下。
