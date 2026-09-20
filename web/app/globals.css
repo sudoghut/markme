@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark light; }
+
+/* §10.4：数字排版是第一性的 —— 全站 tabular-nums，列内小数点对齐。 */
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+/* 预热不足（provisional）：降透明度 + 虚线下划线。
+   **绝不用 0 或上一日的值冒充**（§10.4 诚实优先于漂亮）。 */
+.provisional { opacity: .55; text-decoration: underline dotted currentColor; text-underline-offset: 3px; }
+
+/* 估计值（未确认的事件日）同样用虚线，语义一致。 */
+.estimated { text-decoration: underline dashed currentColor; text-underline-offset: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
