@@ -337,7 +337,7 @@ def run_once(
 
     # 2. 闸门 1 + 2
     gate = when_to_run(sessions, now, cfg.app.settle_minutes)
-    if not gate.should_run and not force:
+    if not gate.should_run and not force and not revision.needs_repair:
         report.status = gate.decision  # type: ignore[assignment]  # 跳过类，直接赋值
         report.note(gate.reason)
         conn.rollback()
@@ -348,7 +348,14 @@ def run_once(
     )
 
     report.session_date = session.date
-    if not force and _already_done(conn, session.date):
+    # **日历修订不能被「本日已做过」吞掉。**
+    #
+    # 修订是在同一个 session 的后续重试里才被发现的 —— 那时本日往往已经有一条
+    # ok 记录。若照常跳过，ordinal 已经改了（write_sessions 在 T2 里），
+    # 而 metrics/strength 不会重算、也不会告警（exit 0）。
+    # 一次真实的、需要修复的状态变更，就此变成一次绿色的「跳过」。
+    must_repair = revision.needs_repair
+    if not force and not must_repair and _already_done(conn, session.date):
         report.status = "skipped_already_done"
         report.note(f"{session.date} 已有成功记录，跳过（§7.1 条件重试）")
         conn.rollback()  # 连 sessions 的写一起丢掉：这一跑什么都不做

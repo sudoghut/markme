@@ -8,24 +8,51 @@
  */
 import { PoolTable, type Row } from "@/components/PoolTable";
 import { TopThree } from "@/components/TopThree";
-import { EmptyDatabase, StaleBanner, Unavailable } from "@/components/States";
+import {
+  DataUnavailableError,
+  EmptyDatabase,
+  StaleBanner,
+  UnavailableNotice,
+  failClosed,
+} from "@/components/States";
 import { app, metrics as metricSpecs, strength, universe } from "@/lib/config";
 import { rest, type MetricRow, type PriceRow, type StrengthRow, type SymbolRow } from "@/lib/supabase";
 
 export const revalidate = 3600;
 
+/**
+ * **构建期没有 HTTP 响应，也就没有状态码可设。**
+ *
+ * 页面走 ISR，所以 `next build` 会预渲染它一次。而数据源不可达时
+ * `failClosed` 是要**抛**的（那是拿到非 200 的唯一办法），
+ * 预渲染期抛出去的结果是**构建失败**，不是一个 500 —— 而 CI 恰恰是
+ * 不给凭证地构建，用来验「数据暂不可用」这个态真的实现了（§12 #9 第 4 条）。
+ *
+ * 两者不矛盾，只是分属两个时刻：构建期渲染这个态，运行期抛。
+ */
+const PRERENDERING = process.env.NEXT_PHASE === "phase-production-build";
+
+export default async function Page() {
+  try {
+    return await Dashboard();
+  } catch (e) {
+    if (PRERENDERING && e instanceof DataUnavailableError) return <UnavailableNotice />;
+    throw e;
+  }
+}
+
 function daysBetween(a: string, b: string): number {
   return Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000);
 }
 
-export default async function Dashboard() {
+async function Dashboard() {
   const R = app.revalidate_seconds;
 
   const symbols = await rest<SymbolRow>("symbols?select=symbol,name,type,enabled&enabled=eq.true&order=symbol", R);
-  if (!symbols.ok) return <Unavailable reason={symbols.reason} status={symbols.status} />;
+  if (!symbols.ok) failClosed(symbols.reason, symbols.status);
 
   const latest = await rest<{ date: string }>("metrics_daily?select=date&order=date.desc&limit=1", R);
-  if (!latest.ok) return <Unavailable reason={latest.reason} status={latest.status} />;
+  if (!latest.ok) failClosed(latest.reason, latest.status);
   const asOf = latest.rows[0]?.date;
   if (!asOf) return <EmptyDatabase />;
 
@@ -56,10 +83,10 @@ export default async function Dashboard() {
   // 不是白屏，是**看起来没事**。
   // 逐个写，不用循环 —— TypeScript 的收窄跟不过异构数组，
   // 而这四行的全部价值就在于每一行都真的挡住了一种失败。
-  if (!metrics.ok) return <Unavailable reason={metrics.reason} status={metrics.status} />;
-  if (!ranks.ok) return <Unavailable reason={ranks.reason} status={ranks.status} />;
-  if (!prices.ok) return <Unavailable reason={prices.reason} status={prices.status} />;
-  if (!sessions.ok) return <Unavailable reason={sessions.reason} status={sessions.status} />;
+  if (!metrics.ok) failClosed(metrics.reason, metrics.status);
+  if (!ranks.ok) failClosed(ranks.reason, ranks.status);
+  if (!prices.ok) failClosed(prices.reason, prices.status);
+  if (!sessions.ok) failClosed(sessions.reason, sessions.status);
 
   const metricBySymbol = new Map(metrics.rows.map((m) => [m.symbol, m]));
   const rankBySymbol = new Map(ranks.rows.map((r) => [r.symbol, r]));
