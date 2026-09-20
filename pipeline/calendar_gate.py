@@ -1,0 +1,136 @@
+"""「今天是否开盘 / 数据是否可信」闸门（§7.2）。
+
+**不要只靠日历或只靠时钟，两者都会骗你。** 四重判定，前三重在这里，
+第四重（供应商脏数据）在 ``fetch.py`` —— 因为它需要数据本身。
+
+1. **日历**：今天是不是交易日，当日**实际**收盘时间是几点（半日市 13:00）。
+2. **时钟**：当前 ET ≥ 当日实际收盘 + ``settle_minutes``，否则 ``skipped_too_early``。
+3. **数据自证（逐标的，不是只看 QQQ）**：每一个标的的最新 bar 日期 == 当日 session。
+   初稿只断言 QQQ，于是「某一只股票拿到昨天的 bar」既不算抓取失败、也过得了闸门：
+   AVGO 的 ``mom_20`` 会用一个错位一天的窗口去和 15 个日期正确的同行排名，
+   全站头条的三强榜就是一个**混合日期的横截面**，而 §4.2 的 ``days_in_top_n``
+   会把这个错误**永久烤进历史**。
+
+时钟一律用**可注入的 ``now``**：§11 M5 的验收标准是「冻结时钟的单元测试覆盖
+4 个 cron 时刻 × 2 个时区(EST/EDT) × 2 类交易日 = 16 种组合」，
+而夏令时**无法靠等待来验证** —— 要等到 3 月或 11 月。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING, Literal
+from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型
+    from collections.abc import Mapping, Sequence
+
+    from pipeline.sessions import Session
+
+__all__ = [
+    "ET",
+    "GateDecision",
+    "gate_opens_at",
+    "session_on_or_before",
+    "stale_symbols",
+    "when_to_run",
+]
+
+#: 全项目唯一的交易所时区常量。
+ET = ZoneInfo("America/New_York")
+
+Decision = Literal["run", "skipped_holiday", "skipped_too_early"]
+
+
+@dataclass(frozen=True, slots=True)
+class GateDecision:
+    decision: Decision
+    session: Session | None
+    opens_at: datetime | None
+    reason: str
+
+    @property
+    def should_run(self) -> bool:
+        return self.decision == "run"
+
+
+def gate_opens_at(session: Session, settle_minutes: int) -> datetime:
+    """闸门 2 放行的那一刻：**当日实际收盘** + ``settle_minutes``（ET）。
+
+    用 session 自己的 ``close_et`` 而不是写死 16:00 —— 半日市 13:00 收盘则
+    14:00 ET 放行，规则自动适配。
+
+    把 ET 墙上时间与 :data:`ET` 组合是无歧义的：美国夏令时切换发生在
+    周日 02:00，而交易日的收盘时刻（13:00 / 16:00）永远不落在那个折叠区间里。
+    """
+    return datetime.combine(session.date, session.close_et, tzinfo=ET) + timedelta(
+        minutes=settle_minutes
+    )
+
+
+def session_on_or_before(sessions: Sequence[Session], day: date) -> Session | None:
+    """不晚于 ``day`` 的最后一个 session。周末 / 假日 dispatch 时用得上。"""
+    past = [s for s in sessions if s.date <= day]
+    return max(past, key=lambda s: s.ordinal) if past else None
+
+
+def when_to_run(
+    sessions: Sequence[Session],
+    now: datetime,
+    settle_minutes: int,
+) -> GateDecision:
+    """闸门 1 + 闸门 2 合在一起判一次。
+
+    ``now`` 必须**带时区**。裸 datetime 在这里是一整类时区 bug 的入口，
+    而它们的表现是「闸门早放行三小时」这种看起来完全正常的行为。
+    """
+    if now.tzinfo is None:
+        raise ValueError("now 必须带时区 —— 裸 datetime 会让闸门 2 的判定悄悄错位")
+    now_et = now.astimezone(ET)
+    today = now_et.date()
+
+    session = next((s for s in sessions if s.date == today), None)
+    if session is None:
+        return GateDecision(
+            decision="skipped_holiday",
+            session=None,
+            opens_at=None,
+            reason=f"{today} 不是交易日",
+        )
+
+    opens = gate_opens_at(session, settle_minutes)
+    if now_et < opens:
+        return GateDecision(
+            decision="skipped_too_early",
+            session=session,
+            opens_at=opens,
+            reason=(
+                f"{today} 收盘 {session.close_et} ET"
+                f"{'（半日市）' if session.is_half_day else ''}"
+                f"，+{settle_minutes} 分钟后（{opens:%H:%M} ET）才放行；现在 {now_et:%H:%M} ET"
+            ),
+        )
+    return GateDecision(
+        decision="run",
+        session=session,
+        opens_at=opens,
+        reason=f"{today} 已收盘 {settle_minutes} 分钟以上",
+    )
+
+
+def stale_symbols(
+    latest_bar: Mapping[str, date | None],
+    session_date: date,
+) -> tuple[str, ...]:
+    """闸门 3：**逐标的**断言最新 bar 日期 == 当日 session 日期。
+
+    返回落后的标的。调用方对它们：指标写 ``NULL``、排除出排名池、
+    状态 ``partial``、在 §10.5 的「部分标的缺失」态里显示出来。
+
+    **不要只看基准。** 初稿只断言 QQQ，于是一只股票拿到昨天的 bar 时，
+    它既不算抓取失败也过得了闸门 —— 而排名是横截面的，
+    一个错位一天的窗口会和 15 个日期正确的同行一起排，
+    产出一个**混合日期的横截面**，然后被 ``days_in_top_n`` 永久烤进历史。
+    """
+    return tuple(sorted(sym for sym, d in latest_bar.items() if d is None or d != session_date))
