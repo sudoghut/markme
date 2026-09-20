@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from pipeline.calendar_gate import ET, stale_symbols, when_to_run
+from pipeline.calendar_gate import ET, interior_gaps, stale_symbols, when_to_run
 from pipeline.compute import build_windows, compute_metrics, compute_strength
 from pipeline.config import load_config
 from pipeline.fetch import fetch_window, restrict_to_sessions
@@ -405,6 +405,23 @@ def run_once(
             report.status = "partial"
         report.note(f"bar 落后：{', '.join(lagging)}")
         prices = prices[~prices["symbol"].isin(lagging)].reset_index(drop=True)
+
+    # 闸门 3 的另一半：窗口**中间**的空洞。
+    #
+    # 上面只比了最新一根。一个内部空洞（某天限流、薄票、供应商单日故障）
+    # 会完整地过掉闸门，而后果是安静的 —— 收益样本被悄悄缩短，
+    # alpha/beta 按日期对齐会丢掉空洞两侧那两天，却仍可能满足 min_obs
+    # 并给出一个看起来完全合理的数。
+    if not prices.empty:
+        bars = {str(sym): list(g["date"]) for sym, g in prices.groupby("symbol", sort=False)}
+        window_dates = [s.date for s in sessions if start <= s.date <= session.date]
+        gaps = interior_gaps(bars, window_dates)
+        if gaps:
+            if report.status == "ok":
+                report.status = "partial"
+            report.note(
+                "窗口内有空洞：" + ", ".join(f"{s}缺{n}根" for s, n in sorted(gaps.items()))
+            )
 
     if prices.empty:
         # **过滤之后要再查一次。** 上面那次检查在过滤之前。
