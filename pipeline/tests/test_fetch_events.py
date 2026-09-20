@@ -18,10 +18,10 @@ from pipeline.fetch_events import (
     EARNINGS_COVERAGE_DAYS,
     SymbolEvent,
     coverage_start,
-    days_between,
-    event_distances,
+    distances_for,
     fetch_symbol_events,
     should_refresh,
+    to_metric_events,
 )
 from pipeline.throttle import RequestBudget
 
@@ -260,68 +260,48 @@ class TestVendorShapes:
         assert [e.event_date for e in out.events] == [date(2024, 6, 20)]
 
 
-class TestEventDistances:
-    """§3.5(6)：日历日 + 今天的边界写死。"""
+class TestTheAdapterToM2:
+    """§3.5(6) 的四个参数**不在这里实现**。
 
-    def test_calendar_days_not_trading_days(self) -> None:
-        """人说「还有 3 天财报」指的是自然日，而全项目其余窗口都用交易日。
-        防混用靠列名写死：``days_*`` vs ``sessions_*``。"""
-        assert days_between(date(2024, 6, 7), date(2024, 6, 10)) == 3  # 跨周末
+    M2 的 ``pipeline/metrics/events.py`` 已经有语义完全相同的
+    ``event_distances``（含「今天」那两条边界）。再写一份就是
+    §6.1.1 那句「两个要对齐的地方，就是将来会不对齐的地方」——
+    而这四个参数正是 §3.5 花了整节论证「错了很难发现」的东西。
+    """
+
+    def test_it_splits_by_event_type(self) -> None:
+        evs = [_ev("earnings", TODAY), _ev("dividend", TODAY + timedelta(days=2), True)]
+        assert [e.event_date for e in to_metric_events(evs, "earnings")] == [TODAY]
+        assert [e.event_date for e in to_metric_events(evs, "dividend")] == [
+            TODAY + timedelta(days=2)
+        ]
+
+    def test_it_carries_the_estimated_flag_through(self) -> None:
+        out = to_metric_events([_ev("earnings", TODAY, True)], "earnings")
+        assert out[0].is_estimated is True
 
     def test_the_day_of_the_event_is_not_self_contradictory(self) -> None:
         """**这是这四个参数一年中唯一真正被人盯着看的那一天。**
 
-        ``next`` 严格大于、``last`` 含当天 → 财报当天
-        ``days_since_last_earnings = 0`` 且 ``days_to_next_earnings`` 指向下一季。
-        不会出现「距财报 0 天」和「财报后 0 天」同时显示。
+        财报当天 ``days_since_last_earnings = 0``，而 ``days_to_next_earnings``
+        指向下一季 —— 不会出现「距财报 0 天」和「财报后 0 天」同时显示。
+        （语义由 M2 保证，这里只确认接线没接反。）
         """
-        events = [_ev("earnings", TODAY), _ev("earnings", TODAY + timedelta(days=91), True)]
-        d = event_distances(events, TODAY)
-        assert d["days_since_last_earnings"] == 0
-        assert d["days_to_next_earnings"] == 91
-        assert d["next_earnings_date"] == TODAY + timedelta(days=91)
-        assert d["next_earnings_is_estimated"] is True
+        d = distances_for(
+            [_ev("earnings", TODAY), _ev("earnings", TODAY + timedelta(days=91), True)], TODAY
+        )
+        assert d.days_since_last_earnings == 0
+        assert d.days_to_next_earnings == 91
+        assert d.next_earnings_is_estimated is True
 
     def test_no_known_future_event_is_null_not_a_big_number(self) -> None:
         """§3.5(2)：没有任何已知未来事件时写 ``NULL``，**不写一个大数字**。"""
-        d = event_distances([_ev("earnings", TODAY - timedelta(days=5))], TODAY)
-        assert d["days_to_next_earnings"] is None
-        assert d["next_earnings_date"] is None
-        assert d["next_earnings_is_estimated"] is None
-        assert d["days_since_last_earnings"] == 5
+        d = distances_for([_ev("earnings", TODAY - timedelta(days=5))], TODAY)
+        assert d.days_to_next_earnings is None
+        assert d.next_earnings_date is None
+        assert d.days_since_last_earnings == 5
 
-    def test_the_nearest_future_event_wins(self) -> None:
-        events = [
-            _ev("earnings", TODAY + timedelta(days=40), True),
-            _ev("earnings", TODAY + timedelta(days=10), True),
-        ]
-        assert event_distances(events, TODAY)["days_to_next_earnings"] == 10
-
-    def test_the_latest_past_event_wins(self) -> None:
-        events = [
-            _ev("earnings", TODAY - timedelta(days=90)),
-            _ev("earnings", TODAY - timedelta(days=5)),
-        ]
-        assert event_distances(events, TODAY)["days_since_last_earnings"] == 5
-
-    def test_both_event_types_are_produced(self) -> None:
-        d = event_distances(
-            [
-                _ev("earnings", TODAY - timedelta(days=1)),
-                _ev("dividend", TODAY + timedelta(days=2)),
-            ],
-            TODAY,
-        )
-        assert set(d) == {
-            "days_to_next_earnings",
-            "days_since_last_earnings",
-            "next_earnings_date",
-            "next_earnings_is_estimated",
-            "days_to_next_dividend",
-            "days_since_last_dividend",
-            "next_dividend_date",
-            "next_dividend_is_estimated",
-        }
-
-    def test_an_empty_event_list_is_all_null(self) -> None:
-        assert all(v is None for v in event_distances([], TODAY).values())
+    def test_dividends_do_not_leak_into_earnings(self) -> None:
+        d = distances_for([_ev("dividend", TODAY + timedelta(days=3), True)], TODAY)
+        assert d.days_to_next_earnings is None
+        assert d.days_to_next_dividend == 3

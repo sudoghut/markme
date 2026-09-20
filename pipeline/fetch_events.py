@@ -31,6 +31,8 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from pipeline.metrics.events import Event as MetricEvent
+from pipeline.metrics.events import EventDistances, event_distances
 from pipeline.throttle import RequestBudget
 
 __all__ = [
@@ -38,10 +40,10 @@ __all__ = [
     "EventFetchOutcome",
     "SymbolEvent",
     "coverage_start",
-    "days_between",
-    "event_distances",
+    "distances_for",
     "fetch_symbol_events",
     "should_refresh",
+    "to_metric_events",
 ]
 
 EventType = Literal["earnings", "dividend"]
@@ -297,39 +299,36 @@ def _to_date(v: Any) -> date | None:
 # ---------------------------------------------------------------------------
 # 四个派生参数（§3.5(6)）
 # ---------------------------------------------------------------------------
-def days_between(a: date, b: date) -> int:
-    """**日历日**，不是交易日（§3.5(6)）。
+#
+# **不在这里实现。** M2 的 ``pipeline/metrics/events.py`` 已经有
+# ``event_distances`` 与 ``EventDistances``，语义完全相同（含「今天」那两条
+# 边界：``next`` 严格大于、``last`` 含当天）。再写一份就是 §6.1.1 那句
+# 「两个要对齐的地方，就是将来会不对齐的地方」—— 而这四个参数正是
+# §3.5 花了整节论证「错了很难发现」的东西。
+#
+# 这里只提供把本模块的 :class:`SymbolEvent` 转成 M2 的 ``Event`` 的适配器。
 
-    人说「还有 3 天财报」指的是自然日，而全项目其余窗口都用交易日。
-    防混用靠列名写死：``days_*`` vs ``sessions_*``。
-    """
-    return (b - a).days
+
+def to_metric_events(events: Sequence[SymbolEvent], event_type: EventType) -> list[MetricEvent]:
+    """``SymbolEvent`` → M2 的 ``Event``，按类型筛选。"""
+    return [
+        MetricEvent(event_date=e.event_date, is_estimated=e.is_estimated)
+        for e in events
+        if e.event_type == event_type
+    ]
 
 
-def event_distances(
-    events: Sequence[SymbolEvent], observed_on: date
-) -> dict[str, int | date | bool | None]:
+def distances_for(events: Sequence[SymbolEvent], observed_on: date) -> EventDistances:
     """四个距离 + 两个日期 + 两个估计标记，**只给最新一个 session 的行**（§3.5(3)）。
 
-    今天的边界写死（这是这四个参数一年中唯一真正被人盯着看的那一天）：
-
-    - ``next``：``event_date > 观测日``（**严格大于**）
-    - ``last``：``event_date <= 观测日``（**含当天**）
-
-    于是财报当天 ``days_since_last_earnings = 0``，而 ``days_to_next_earnings``
-    指向下一季 —— 不会出现「距财报 0 天」和「财报后 0 天」同时显示的自相矛盾。
-
-    没有任何已知未来事件时写 ``None``，**不写一个大数字**（§3.5(2)）。
+    §3.0 规则 2 每天重写全部 400 行，那条规则对复权因子是对的
+    （追溯改写的因子**追溯为真**），但对事件**恰好相反**：
+    AAPL 把财报从 10-29 挪到 11-05，并不会让「10-01 那天公布的预告是 28 天后」
+    这件事变成假的。每天重写会让同一条历史行今天显示 28、明天显示 35。
     """
-    out: dict[str, int | date | bool | None] = {}
-    for etype, label in (("earnings", "earnings"), ("dividend", "dividend")):
-        same = [e for e in events if e.event_type == etype]
-        future = sorted([e for e in same if e.event_date > observed_on], key=lambda e: e.event_date)
-        past = sorted([e for e in same if e.event_date <= observed_on], key=lambda e: e.event_date)
-        nxt = future[0] if future else None
-        lst = past[-1] if past else None
-        out[f"days_to_next_{label}"] = days_between(observed_on, nxt.event_date) if nxt else None
-        out[f"days_since_last_{label}"] = days_between(lst.event_date, observed_on) if lst else None
-        out[f"next_{label}_date"] = nxt.event_date if nxt else None
-        out[f"next_{label}_is_estimated"] = nxt.is_estimated if nxt else None
+    out: EventDistances = event_distances(
+        observed_on,
+        earnings=to_metric_events(events, "earnings"),
+        dividends=to_metric_events(events, "dividend"),
+    )
     return out

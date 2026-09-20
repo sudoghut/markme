@@ -281,10 +281,19 @@ where date < (select max(date) from metrics_daily)
 --
 -- 守卫放在 having 里而不是 where：无 group by 的聚合查询在零行输入上
 -- 仍会产出恰好一个分组，where 里的守卫根本轮不到被求值。
+--
+-- **期望值要减去「分数算不出来」的那些标的。**
+-- §4.1 规则 ③：非有限分（新加入、bar 数不足 min_bars）的标的**不进榜**
+-- —— rank_pool 直接把它们丢掉，不是给一个空名次。
+-- 不减去它们，这条断言会在**加标的那一天**对一个完全健康的库报警，
+-- 而长期飘红的断言会把整套补偿策略训练成「反正它总是红的」。
 select 'latest ranking has ' || count(*)::text || ' rows, expected ' || (
          select count(*) from symbols sy
+         join metrics_daily m
+           on m.symbol = sy.symbol and m.date = max(v.date)
          where sy.enabled
            and (max(v.rank_pool) = 'all' or sy.type = 'stock')
+           and m.mom_20 is not null
        )::text as violation
 from v_strength_enriched v
 where v.date = (select max(date) from v_strength_enriched)
@@ -297,8 +306,11 @@ where v.date = (select max(date) from v_strength_enriched)
 having exists (select 1 from strength_daily)
    and count(*) <> (
          select count(*) from symbols sy
+         join metrics_daily m
+           on m.symbol = sy.symbol and m.date = max(v.date)
          where sy.enabled
            and (max(v.rank_pool) = 'all' or sy.type = 'stock')
+           and m.mom_20 is not null
        );
 
 -- name: in_top_n 为真的行必须有 days_in_top_n
