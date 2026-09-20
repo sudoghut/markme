@@ -1,0 +1,33 @@
+# 标的池（§2）。增删标的 = 改这一个文件 + 跑一次 backfill，不改任何代码。
+#
+# 删除不是真删：prices_daily.symbol 对 symbols 有外键，
+# 从这里移出的标的由 sync_symbols.py 置 enabled = false（软删除），历史数据保留。
+
+# alpha/beta 的基准（§3.4）。它必须同时出现在下面的 symbols 里 ——
+# 既是基准，又是 universe 成员，两个角色分开声明。
+benchmark: QQQ
+
+symbols:
+  # ── ETF ────────────────────────────────────────────────────────────────
+  # SPY 不入池（§12 #2）：本项目的基准是 QQQ，放一个既不当基准、
+  # 又不参与排名、也没人看的 S&P ETF 进来只会让全池表格多一行噪音。
+  - { symbol: QQQ, name: "Invesco QQQ Trust", type: etf, enabled: true }
+
+  # ── 个股（16 只，与 low-buy core/data.py 的 STOCK_SYMBOLS 一致）──────────
+  # 这是一份**事实快照**，不是依赖：markme 与 low-buy 完全独立（AGENTS.md）。
+  - { symbol: AAPL,  name: "Apple",                  type: stock, enabled: true }
+  - { symbol: AMD,   name: "Advanced Micro Devices", type: stock, enabled: true }
+  - { symbol: AMZN,  name: "Amazon",                 type: stock, enabled: true }
+  - { symbol: ASML,  name: "ASML Holding",           type: stock, enabled: true }
+  - { symbol: AVGO,  name: "Broadcom",               type: stock, enabled: true }
+  - { symbol: COST,  name: "Costco",                 type: stock, enabled: true }
+  - { symbol: GOOGL, name: "Alphabet",               type: stock, enabled: true }
+  - { symbol: INTC,  name: "Intel",                  type: stock, enabled: true }
+  - { symbol: META,  name: "Meta Platforms",         type: stock, enabled: true }
+  - { symbol: MSFT,  name: "Microsoft",              type: stock, enabled: true }
+  - { symbol: MU,    name: "Micron Technology",      type: stock, enabled: true }
+  - { symbol: NFLX,  name: "Netflix",                type: stock, enabled: true }
+  - { symbol: NVDA,  name: "NVIDIA",                 type: stock, enabled: true }
+  - { symbol: ORCL,  name: "Oracle",                 type: stock, enabled: true }
+  - { symbol: TSLA,  name: "Tesla",                  type: stock, enabled: true }
+  - { symbol: TSM,   name: "Taiwan Semiconductor",   type: stock, enabled: true }

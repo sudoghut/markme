@@ -1,0 +1,119 @@
+# 指标及其参数（§6.2）。
+#
+# 这份文件同时驱动 pipeline、数据库写入、前端表头与方法论页。
+# 新增一个**纯价格派生**指标 = 写一个纯函数并 @register + 在这里加一条 +
+# 加一个 golden-value 测试 + 跑 backfill。
+#
+# 注意 §3.6 已经说明：那句「不需要改 schema、不需要改前端」只对纯价格派生成立。
+# event_distances 就是反例 —— 它引入了新的**数据域**，代价绕不开。
+#
+# 字段语义（§3.3，pydantic 强制 min_bars <= provisional_below）：
+#   min_bars          低于此根数一律写 NULL（硬闸门，不出值）
+#   provisional_below 低于此根数出值但标 provisional（软闸门，前端灰标）
+
+metrics:
+  - id: rsi_14
+    fn: rsi_wilder # pipeline/metrics/registry.py 中注册的函数名
+    core: true # true → 占 metrics_daily 的显式列
+    params: { period: 14 }
+    # 第一个 RSI 落在第 15 根收盘价上（delta_0 不存在）——
+    # 这是每次 RSI 重实现都会犯的经典 off-by-one。
+    min_bars: 15
+    # Wilder 递归是无限脉冲响应，理论上永不收敛，所以软闸门定在 250。
+    provisional_below: 250
+    display: { label: "RSI(14)", format: "number:1", widget: rsi_bar }
+
+  - id: ema_60
+    fn: ema
+    core: true
+    params: { period: 60 }
+    min_bars: 60
+    # 展示策略是 180；计算时的**喂入**要求是 360（6×N，§12 #5 标准 B）。
+    # 两者不冲突：一个说「灰不灰」，一个说「喂多少」。
+    provisional_below: 180
+    display: { label: "EMA(60)", format: "price", widget: plain }
+    derived:
+      # 注意分子是 adj_close 而不是 close —— 两者混用会让拆股/分红前的历史行
+      # 读出荒谬的百分比，且全程不报错（§3.0 规则 1）。
+      - id: close_vs_ema60_pct
+        expr: "adj_close / ema_60 - 1"
+        display: { label: "距 EMA60", format: "pct:2", widget: diverging_bar }
+      - id: ema60_slope_20d
+        expr: "ema_60 / lag(ema_60, 20) - 1"
+        display: { label: "EMA60 斜率(20d)", format: "pct:2", widget: signed }
+
+  - id: alpha_beta_126
+    fn: alpha_beta
+    core: true
+    params:
+      window: 126
+      benchmark: QQQ
+      min_obs: 120
+      # 线性，不是复利（§3.4）：alpha_d 是回归残差的均值，不是复利收益路径。
+      # 复利式会把强势半年的 α 夸大 2–4.5 倍，极端时还会撑爆数值列宽。
+      annualization: linear
+      # 形状现在就按时间序列设计，否则将来接 ^IRX 时要改结构。
+      # ^IRX 报的是百分数（5.25 = 5.25%），必须先 /100 再 /252。
+      risk_free: { mode: constant, annual: 0.0, symbol: "^IRX", units: percent }
+    outputs:
+      [alpha_annual, beta, r2, corr, resid_vol_annual, alpha_t_stat, n_obs]
+    display: # 每个 output 都必须有一条（§6.2 校验 3）
+      alpha_annual:
+        { label: "α (年化)", format: "pct:2", widget: signed, dim_when: "abs(alpha_t_stat) < 2" }
+      beta: { label: "β", format: "number:2", widget: beta_bar, dim_when: "r2 < 0.3" }
+      r2: { label: "R²", format: "number:2", widget: plain }
+      corr: { label: "相关", format: "number:2", widget: plain }
+      resid_vol_annual: { label: "残差波动(年化)", format: "pct:1", widget: plain }
+      alpha_t_stat: { label: "α t 值", format: "number:2", widget: plain }
+      n_obs: { label: "样本数", format: "int", widget: plain }
+
+  - id: mom_20
+    fn: momentum
+    core: true
+    params: { period: 20 }
+    # 主排序分。漏了这条会靠 NaN 兜底，而 NaN 的排序位置跨输入顺序不确定（§4.1）。
+    min_bars: 21
+    display: { label: "20日动量", format: "pct:2", widget: signed }
+
+  - id: event_distances
+    fn: event_distances # 依赖 symbol_events 表，不依赖收盘价（§3.5）
+    core: true
+    # 单位是**日历日**（人说「还有 3 天财报」指的是自然日），
+    # 与全项目其余窗口的交易日单位由列名 days_* / sessions_* 隔开。
+    # latest_row_only：只在最新一个 session 的行上算，历史行一律 NULL ——
+    # 事件改期不会让「当时的预告是 28 天后」变成假的，每天重写会让同一条
+    # 历史行今天 28、明天 35，永不稳定（§3.5(3)）。
+    params: { unit: calendar_days, latest_row_only: true }
+    # 刷新节奏是**运行参数**，住在 app.yaml —— 节奏旋钮不能有两个家。
+    outputs:
+      [
+        days_to_next_earnings,
+        days_since_last_earnings,
+        days_to_next_dividend,
+        days_since_last_dividend,
+        next_earnings_date,
+        next_dividend_date,
+        next_earnings_is_estimated,
+        next_dividend_is_estimated,
+      ]
+    display:
+      days_to_next_earnings:
+        {
+          label: "距财报",
+          format: "days",
+          widget: countdown_chip,
+          estimated_flag: next_earnings_is_estimated,
+        }
+      days_since_last_earnings: { label: "财报后", format: "days", widget: plain }
+      days_to_next_dividend:
+        {
+          label: "距除息",
+          format: "days",
+          widget: countdown_chip,
+          estimated_flag: next_dividend_is_estimated,
+        }
+      days_since_last_dividend: { label: "除息后", format: "days", widget: plain }
+      next_earnings_date: { label: "财报日", format: "date", widget: plain }
+      next_dividend_date: { label: "除息日", format: "date", widget: plain }
+      next_earnings_is_estimated: { label: "财报日为估计", format: "bool", widget: hidden }
+      next_dividend_is_estimated: { label: "除息日为估计", format: "bool", widget: hidden }

@@ -35,7 +35,23 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   若 `fetch.py` 直接 import 它，就要提升为直接依赖；
   或者用 `pandas.read_csv(url)`，那样不需要新增任何依赖。
 
+## M3（数据库）之前
+
+- **删掉 `test_config.py` 里的 `REAL_METRICS_COLUMNS` 常量。** M1 拿它当「数据库列」
+  的替身，两名 reviewer 已独立核对过它与 §9.1 的 DDL 一致。
+  M3 必须让解析器真的读 `0001_init.sql`，然后**删掉**这份手抄常量 ——
+  再复制一份就是 §6.1.1 警告的「两个要对齐的地方」。
+
 ## M6 / M7（前端）之前
+
+- **`dim_when` 需要一个 TypeScript 孪生实现。** §6.1 说前端用 js-yaml 直接读 YAML，
+  所以 `DimExpr.evaluate` 的语义要在前端重写一遍。**两份实现就是两个要对齐的地方**，
+  所以务必对齐这几条而不只是比较运算：
+  - Kleene 三值 `and` / `or`（`False and NULL` → False，`NULL and True` → NULL）
+  - `null` / `NaN` / **`Infinity`** / 非数值 一律 → 打灰（fail closed）
+  - 求值期绝不抛异常
+  - 根节点必须是比较或布尔运算
+
 
 - **`.gitattributes` 的二进制类型表**已预置常见前端资源（woff2/ico/webp），
   新增其他类型时记得补，否则 `* text=auto eol=lf` 会去归一化二进制文件。
