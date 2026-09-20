@@ -33,13 +33,23 @@ metrics:
     provisional_below: 180
     display: { label: "EMA(60)", format: "price", widget: plain }
     derived:
+      # ── expr 是**文档，不是实现** ──────────────────────────────────────
+      # 权威实现是 pipeline/metrics/ema.py 里的 close_vs_ema_pct / ema_slope。
+      # 这里的 expr 只是给读 config 的人（和方法论页）一个可读的公式，
+      # 没有任何代码会去解释它。
+      #
+      # 两者已经在一个地方不一致：Python 版对分母为 0 写 NaN，
+      # 而字面照搬 expr 会得到 ±inf —— 无穷大的百分比没有可读含义。
+      # 把「谁是权威」写在这里，是为了避免 M3 接线时把它当成第二个事实来源
+      # （§6.1.1：两个要对齐的地方，就是将来会不对齐的地方）。
+      #
       # 注意分子是 adj_close 而不是 close —— 两者混用会让拆股/分红前的历史行
       # 读出荒谬的百分比，且全程不报错（§3.0 规则 1）。
       - id: close_vs_ema60_pct
-        expr: "adj_close / ema_60 - 1"
+        expr: "adj_close / ema_60 - 1" # 文档；实现见 ema.close_vs_ema_pct
         display: { label: "距 EMA60", format: "pct:2", widget: diverging_bar }
       - id: ema60_slope_20d
-        expr: "ema_60 / lag(ema_60, 20) - 1"
+        expr: "ema_60 / lag(ema_60, 20) - 1" # 文档；实现见 ema.ema_slope
         display: { label: "EMA60 斜率(20d)", format: "pct:2", widget: signed }
 
   - id: alpha_beta_126
