@@ -1,0 +1,19 @@
+# §8.1.1「配套的三件事」之二：依赖锁死之后，需要一个更新信号，
+# 否则依赖集合会永远冻结在第一次 uv lock 的结果上。
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      dev-tools:
+        patterns: ["ruff", "mypy", "pytest*", "*-stubs", "types-*"]
+
+  # SHA 钉版本（§8.3）能防投毒，但也会让 action 永远停在旧版本。
+  # 这一条负责让钉住的 SHA 不腐烂。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

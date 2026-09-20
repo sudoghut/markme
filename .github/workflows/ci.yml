@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # workflow_dispatch / schedule 会让 gitleaks-action 走**全历史**扫描分支；
+  # push / pull_request 事件下它只扫本次 diff（见 secrets job 的说明）。
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1" # 每周一全历史扫一次
+
+# 最小权限（§8.3）。仓库级默认也设为 read-only。
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与 pyproject.toml 的 requires-python 和 .python-version 保持一致。
+  # 必须显式传给 setup-uv，否则 uv 会挑 runner 自带的解释器 ——
+  # 而 uv.lock 里带着 python_full_version 的解析标记，换解释器会装出不同的包集合。
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Action 按 commit SHA 钉版本（§8.3），不用浮动 tag。
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
+        with:
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install (locked, hashes enforced)
+        # --locked：uv.lock 与 pyproject.toml 不一致就**直接失败**，
+        # 而不是悄悄重新解析出一组没人审过的依赖（§8.1.1）。
+        # 注意不能用 --frozen —— 那是「跳过检查、照用 lock」，语义正好相反。
+        run: uv sync --locked --all-extras
+
+      - name: ruff (lint)
+        run: uv run ruff check .
+
+      - name: ruff (format)
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: pytest
+        run: uv run pytest
+
+  # 公开仓库一旦泄露就是永久泄露（§8.3）。
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # 全历史；schedule / workflow_dispatch 下 gitleaks 才扫得到
+
+      - uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3 # v2.3.7
+        env:
+          # 没有这个 token，action 在 pull_request 路径上是无条件 process.exit(1)：
+          # 它要靠 API 取 PR 的 commit 列表来定扫描范围。而 AGENTS.md 规定
+          # 所有改动都走 PR —— 漏了它，CI 永远红，PR 永远合不了。
+          # 在 permissions: contents: read 之下这个自动 token 也是只读的。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          # 只读 token 发不了 PR 评论，关掉以免在真出事那一次刷出误导性 warning。
+          GITLEAKS_ENABLE_COMMENTS: "false"
