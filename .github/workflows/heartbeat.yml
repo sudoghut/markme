@@ -37,7 +37,7 @@ jobs:
       # §9.4 的备份论证：**绝大部分数据都能从供应商重新推导**，所以影响低 ——
       # 但这是一个值得讲出来的论证，而不是省略掉。
       # 一个月度 pg_dump 近乎免费，买的是「供应商历史口径也一起变了」时的后悔药。
-      - uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           python-version: '3.13'
