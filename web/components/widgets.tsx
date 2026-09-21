@@ -86,19 +86,39 @@ export function BetaScale({ value }: { value: number | null }) {
 }
 
 /**
- * α → 带符号数值 + 显著性；`|t| < 2` 降透明度并加「未显著」微标签。
+ * α → 带符号数值 + 显著性角标。
  *
- * 这条是 §10.4 里最要紧的一个诚实标注：一个不显著的 α 在视觉上
+ * 这是 §10.4 里最要紧的一个诚实标注：一个不显著的 α 在视觉上
  * 不该和一个显著的 α 长得一样。
+ *
+ * **`opacity-60` 只加在数字上，不加在角标上。**
+ *
+ * 初版把它加在外层 span 上，于是整个单元格一起变暗 —— 包括那个角标。
+ * 实测对比度：角标文字 1.99:1、角标底色对页面 1.09:1
+ * （zinc-500 与 ink-800 在 60% 不透明度下压到 ink-950 上）。
+ * 也就是说**它在 DOM 里，但人眼看不见**，读起来只是一行普通文字。
+ *
+ * 而这个角标的全部职责就是说「这个数字是噪声，别当真」——
+ * 让「不可信」这个样式把「不可信」这个标记本身也抹掉，
+ * 恰好是 §10.4「诚实优先于漂亮」要防的那种反讽。
+ *
+ * 现在：数字变暗（它才是信不过的那个），角标保持不透明并提亮到 11.21:1，
+ * 加一圈边框让它在深色背景上真的像一块角标。
  */
 export function Alpha({ value, t }: { value: number | null; t: number | null }) {
   if (isMissing(value)) return <Missing />;
   const weak = isMissing(t) || Math.abs(t as number) < 2;
+  const why = isMissing(t) ? "无 t 值" : `t = ${(t as number).toFixed(2)}`;
   return (
-    <span className={`inline-flex items-center gap-1 ${weak ? "opacity-60" : ""}`}>
-      <Signed value={value} spec="pct:1" />
+    <span className="inline-flex items-center justify-end gap-1 whitespace-nowrap">
+      <span className={weak ? "opacity-60" : ""}>
+        <Signed value={value} spec="pct:1" />
+      </span>
       {weak ? (
-        <span className="rounded bg-ink-800 px-1 text-[10px] text-zinc-500" title={isMissing(t) ? "无 t 值" : `t = ${(t as number).toFixed(2)}`}>
+        <span
+          className="shrink-0 rounded border border-ink-700 bg-ink-800 px-1 text-[10px] leading-4 text-zinc-300"
+          title={`${why}；|t| < 2，这个 α 与 0 区分不开`}
+        >
           未显著
         </span>
       ) : null}
