@@ -47,15 +47,19 @@ jobs:
       # 而 job 永远是绿的：月度备份从来没跑过，也没人会发现。
       # `secrets` 上下文在 step 级 `if` 里同样不可用，所以先用一步把
       # 「配没配」变成一个**非敏感的 output**，secret 仍然只出现在它自己那一步里。
-      - name: 有没有配 MARKME_DB_URL
+      - name: 有没有配 MARKME_BACKUP_URL
         id: cfg
         env:
-          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
-        run: echo "have=${MARKME_DB_URL:+yes}" >> "$GITHUB_OUTPUT"
+          MARKME_BACKUP_URL: ${{ secrets.MARKME_BACKUP_URL }}
+        run: echo "have=${MARKME_BACKUP_URL:+yes}" >> "$GITHUB_OUTPUT"
       - name: pg_dump 备份
         if: steps.cfg.outputs.have == 'yes'
         env:
-          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+          # **备份走 `backup_reader`，不是 `pipeline_writer`。**
+          # 六张表都开了 RLS，而 writer 既不是 owner 也没有 BYPASSRLS，
+          # 于是 pg_dump 拒绝导出（见 0002_backup_reader.sql 的文件头）。
+          # backup_reader 是只读 + bypassrls 的专用角色。
+          MARKME_BACKUP_URL: ${{ secrets.MARKME_BACKUP_URL }}
         run: |
           # **这个月度备份在修好之前一次都没成功过。**
           # `apt-get install postgresql-client` 在 ubuntu-24.04 上装到的是 16，
@@ -93,20 +97,7 @@ jobs:
           # 而且就算有权限也不该备 —— `auth` 里是用户凭证，不该躺在一个
           # 保留 90 天的 artifact 里。§9.4 要的后悔药是**我们的数据**：
           # `public`（六张表 + 视图）与 `private`（runs / fetch_state）。
-          # **跳过所有序列的「当前值」。** 写入角色能往表里插数据，却没有 SELECT
-          # 序列当前值的权限（实测先后撞上 `private.runs_id_seq`、
-          # `public.symbol_events_id_seq` —— 不是个别序列，是对序列整体没有 SELECT）。
-          # 跳过的只是序列的**数据**，序列对象本身照常进 dump，所以列上的
-          # DEFAULT 不会悬空。
-          #
-          # **但恢复时必须补一步 `setval`**：否则 `nextval` 从 1 开始，而表里
-          # 已经有 1..N 行，下一次插入会撞主键。恢复手册里的一行：
-          #   select setval(pg_get_serial_sequence(t, c), (select max(c) from t));
-          # 对 `public.symbol_events` 与 `private.runs` 各跑一次。
-          #
-          # 真正干净的解法是给那个角色补一条 `grant select on all sequences`，
-          # 但那要动生产授权（§9.3 把授权当安全边界），单独决定 —— 已记进 BACKLOG。
-          "$PGBIN" --no-owner --no-privileges --format=custom --schema=public --schema=private --exclude-table-data='public.*_seq' --exclude-table-data='private.*_seq' --file="/tmp/backup/markme-$(date -u +'%Y-%m').dump" "$MARKME_DB_URL"
+          "$PGBIN" --no-owner --no-privileges --format=custom --schema=public --schema=private --file="/tmp/backup/markme-$(date -u +'%Y-%m').dump" "$MARKME_BACKUP_URL"
           ls -la /tmp/backup
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.cfg.outputs.have == 'yes'
