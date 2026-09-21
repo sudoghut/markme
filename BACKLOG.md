@@ -84,6 +84,12 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   没配时 `daily.yml` 静默跳过那一步 —— 也就是说「管道整个不复存在」
   这一类故障目前**没有探测器**，只有 `keepalive.yml` 每天那次站点健康检查。
 
+- **为受 Vercel Deployment Protection 保护的 production 配置健康检查 bypass。**
+  `keepalive.yml` 已在 GitHub secret `VERCEL_AUTOMATION_BYPASS_SECRET` 存在时发送
+  `x-vercel-protection-bypass`；需由项目管理员在 Vercel 创建一个仅供 CI 使用的
+  Protection Bypass for Automation secret，并同步到 GitHub。否则若 production 开启
+  Vercel Authentication / Password Protection，健康检查会在到达 `/api/health` 前被拦住。
+
 ## 随时
 
 - **Action 的 SHA 钉版本会腐烂。** `actions/checkout` v4.2.2（2024-10）与
@@ -105,4 +111,3 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   `VERCEL_TOKEN` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID` 与
   `REVALIDATE_TOKEN` 都已加回，值一律写成占位符 ——
   真值从本地 `.env` 读。
-

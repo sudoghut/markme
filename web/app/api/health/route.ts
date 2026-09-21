@@ -33,7 +33,29 @@ export const fetchCache = "force-no-store";
 const URL_ = process.env.SUPABASE_URL?.replace(/\/$/, "") ?? "";
 const KEY = process.env.SUPABASE_ANON_KEY ?? "";
 
-export async function GET() {
+/**
+ * **这个端点要鉴权。**
+ *
+ * middleware 的 matcher 排除了 `/api/*`（见 middleware.ts 的文件头），
+ * 所以 §10.5 那道密码门**不保护它**。而它是故意不带缓存的：每一次请求
+ * 都真打一次 Supabase。两件事凑在一起就是一个没有速率限制的额度燃烧器 ——
+ * 任何人一个循环就能绕过密码门去烧免费额度，而「爬虫刷不到 → 免费额度
+ * 风险归零」恰恰是 §10.5 说密码门买到的东西之一。
+ *
+ * `/api/revalidate` 正因为同样不被 middleware 保护，才自带了 token；
+ * 这里沿用同一个 token，keepalive 那一步多带一个 header 就行。
+ */
+function authorized(req: Request): boolean {
+  const token = process.env.REVALIDATE_TOKEN;
+  if (!token) return false;
+  return req.headers.get("x-health-token") === token;
+}
+
+export async function GET(req: Request) {
+  if (!authorized(req)) {
+    // 401 而不是 503：这不是数据源的问题，别让监控把它读成一次故障。
+    return NextResponse.json({ ok: false, reason: "未授权" }, { status: 401 });
+  }
   if (!URL_ || !KEY) {
     return NextResponse.json(
       { ok: false, reason: "未配置 SUPABASE_URL / SUPABASE_ANON_KEY" },

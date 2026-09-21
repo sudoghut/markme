@@ -53,11 +53,35 @@ jobs:
         # 而它恰恰不会让任何 workflow 变红，除非有人去看。
         #
         # 没配 SITE_URL 就跳过：它是可选的，缺它不该让这个 job 变红。
-        if: env.SITE_URL != ''
+        #
+        # **判据必须是 `vars.`，不能是 `env.`。** step 级的 `if` 在这个 step
+        # **自己的 `env:` 块求值之前**就被求值，于是 `env.SITE_URL` 恒为 null、
+        # 条件恒为假 —— 这一步每天都是 skipped，而 job 每天都是绿的。
+        # 比变红更难发现：skipped 不发邮件、不变红、日志里也不显眼，
+        # 于是「状态码归给 /api/health 再由 CI 断言」那个闭环是断的，没人知道。
+        if: vars.SITE_URL != ''
         env:
           SITE_URL: ${{ vars.SITE_URL }}
+          HEALTH_TOKEN: ${{ secrets.REVALIDATE_TOKEN }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
-          code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 30 "$SITE_URL/api/health")
-          cat /tmp/health.json
+          # 不用 `code=$(curl ...)`：runner 的默认 shell 是 `bash -e`，
+          # 连不上时 curl 非零会**直接终止这一步**，下面两行诊断输出一个字都拿不到。
+          # 拆开写，把状态码和响应体都打出来再判。
+          # 尾斜杠：SITE_URL 若带 `/`，拼出来是 `//api/health`，Next 会 308 规范化。
+          base="${SITE_URL%/}"
+          # production 也启用 Vercel Deployment Protection 时，认证会在请求到达
+          # Route Handler **之前**拦住它。该 secret 是 Vercel 专给自动化的 bypass，
+          # 只在已配置时附带，未启用保护的项目无需配置。
+          headers=(-H "x-health-token: $HEALTH_TOKEN")
+          if [ -n "$VERCEL_AUTOMATION_BYPASS_SECRET" ]; then
+            headers+=(-H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET")
+          fi
+          set +e
+          code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 30 "${headers[@]}" "$base/api/health")
+          rc=$?
+          set -e
+          echo "curl exit=$rc http=$code"
+          cat /tmp/health.json 2>/dev/null || echo '(没有响应体)'
           echo
           test "$code" = "200"

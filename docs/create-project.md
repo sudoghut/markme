@@ -1244,7 +1244,11 @@ Supabase 项目被暂停 —— 产出的正是沉默，在这个设计里**与�
    Environment Variables 填 `SUPABASE_URL`、`SUPABASE_ANON_KEY`。
    Vercel 与 GitHub 是 **OAuth 关联，不需要任何 API key**。
    （若采纳 §10.1 的按需 revalidate，再加一条 `REVALIDATE_TOKEN`，两边同值。）
-4. 无需数据源密钥（yfinance / Stooq 都不要）。若将来升级 Tiingo 再加一条 Secret。
+4. 若 production 启用 Vercel Deployment Protection，在 Vercel 创建一个仅供 CI 使用的
+   Protection Bypass for Automation secret，并作为 GitHub Secret
+   `VERCEL_AUTOMATION_BYPASS_SECRET` 保存；`keepalive.yml` 只在该值存在时发送
+   `x-vercel-protection-bypass`。否则健康检查会在到达 `/api/health` 前被拦住。
+5. 无需数据源密钥（yfinance / Stooq 都不要）。若将来升级 Tiingo 再加一条 Secret。
 
 **最省事的顺序**：你建好那个 Supabase 项目 → 自己把 Secret 填进 GitHub →
 只把 **URL 和 anon key** 告诉我（这两个本来就公开）。写库凭证我全程不需要看见。
@@ -1936,15 +1940,23 @@ where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity;
 
 ### 10.1 技术选型
 Next.js 15 App Router + TypeScript + Tailwind + Server Components。
-数据读取放在 **服务端**，页面走 ISR：
-- 用户浏览器不直连 Supabase → anon key 不进浏览器包；
-- 全球 CDN 命中，Supabase 出站流量接近零；
-- 首屏是纯 HTML，无 loading 闪烁。
+数据读取放在 **服务端**。首页按请求渲染（`dynamic = "force-dynamic"`），而不是页面级 ISR：
 
-**`revalidate = 3600` + 按需重验证**，不是初稿的 `revalidate = 300`。
-对一个一天只变一次的数据源，300 秒意味着**每天 288 次重新生成**，
-与「出站流量接近零」自相矛盾，而且烧的是 Vercel 的 ISR/函数额度
-（在这个项目里它比 Supabase 的额度更可能先触顶，而 §13 没提这一条）。
+- 用户浏览器不直连 Supabase → anon key 不进浏览器包；
+- 每个 Supabase `fetch` 显式带 `next: { revalidate: 3600 }`，所以缓存的是 **Data Cache**，
+  不会因页面动态化而把每次访问都变成出站请求；
+- 首屏仍是服务端 HTML，无 loading 闪烁；
+- 陈旧天数每次请求重算，不会被 Full Route Cache 中一份旧页面永久冻结。
+
+这避免了页面级 ISR 的 stale-while-revalidate 失败模式：数据源失联时，热 ISR
+条目仍会以 200 返回旧价格和旧的「未陈旧」判断。Data Cache 本身仍是
+stale-while-revalidate；这是可接受的，因为缓存内的价格及其 `as of` 日期仍为真。
+冷缓存的真实读取失败则 fail closed 为 500。监控「数据源此刻可用吗」由不缓存的、
+token 鉴权的 `/api/health` 承担；它每次直读一行并在数据库/授权异常时返回 503。
+
+**Data Cache 的 `revalidate = 3600` + 按需重验证**，不是初稿的 `revalidate = 300`。
+对一个一天只变一次的数据源，300 秒意味着**每天 288 次重新验证**，
+与「出站流量接近零」自相矛盾，而且烧的是 Vercel 的函数额度。
 → 日常任务写库成功后 POST 一次 `/api/revalidate?token=...`。
 **必须断言响应是 200**，非 200 升为 `partial` —— 否则一个 307 跳转会被当成成功（§10.5）。
 代价是多一个 secret，换来的是**管道写完几秒内**页面就更新，

@@ -42,8 +42,18 @@ jobs:
           enable-cache: true
           python-version: '3.13'
       - run: uv sync --locked
+      # **`if: env.SECRET != ''` 是个静默的坑。** step 级 `if` 在该 step 自己的
+      # `env:` 求值之前就被求值，所以那样写条件恒为假 —— 这两步会**永远 skipped**，
+      # 而 job 永远是绿的：月度备份从来没跑过，也没人会发现。
+      # `secrets` 上下文在 step 级 `if` 里同样不可用，所以先用一步把
+      # 「配没配」变成一个**非敏感的 output**，secret 仍然只出现在它自己那一步里。
+      - name: 有没有配 MARKME_DB_URL
+        id: cfg
+        env:
+          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+        run: echo "have=${MARKME_DB_URL:+yes}" >> "$GITHUB_OUTPUT"
       - name: pg_dump 备份
-        if: env.MARKME_DB_URL != ''
+        if: steps.cfg.outputs.have == 'yes'
         env:
           MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
         run: |
@@ -52,9 +62,7 @@ jobs:
           pg_dump --no-owner --no-privileges --format=custom             --file="/tmp/backup/markme-$(date -u +'%Y-%m').dump" "$MARKME_DB_URL"
           ls -la /tmp/backup
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        if: env.MARKME_DB_URL != ''
-        env:
-          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+        if: steps.cfg.outputs.have == 'yes'
         with:
           name: pg_dump
           path: /tmp/backup
