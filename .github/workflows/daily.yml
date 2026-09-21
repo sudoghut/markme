@@ -61,13 +61,22 @@ jobs:
           REVALIDATE_TOKEN: ${{ secrets.REVALIDATE_TOKEN }}
         run: uv run python -m pipeline.run_daily ${{ inputs.force && '--force' || '' }}
 
+      - name: 有没有配 HEALTHCHECK_URL
+        id: hc
+        if: success()
+        env:
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+        run: echo "have=${HEALTHCHECK_URL:+yes}" >> "$GITHUB_OUTPUT"
       - name: dead-man's switch
         # §7.2.1：**沉默是这个设计里最危险的状态。**
         # Actions 的失败通知只能对「跑了并且失败」告警，对「根本没跑」永远沉默 ——
         # 而「管道不复存在」这一整类故障产出的正是沉默。
         # 成功时 ping 一个 URL，**没收到 ping 才是告警**。
         # 没配这个 secret 时静默跳过（它是可选的，缺它不该让管道变红）。
-        if: success() && env.HEALTHCHECK_URL != ''
+        # `if: env.SECRET != ''` 恒为假（step 级 if 在该 step 自己的 env 之前求值），
+        # 而 `secrets` 上下文在 step 级 if 里也不可用 —— 见 heartbeat.yml 里的同款。
+        # dead-man's switch 若永远 skipped，那就**正好**是它要防的那种沉默。
+        if: success() && steps.hc.outputs.have == 'yes'
         env:
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: curl -fsS --retry 3 --max-time 20 "$HEALTHCHECK_URL" || true

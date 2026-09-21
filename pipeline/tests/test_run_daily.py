@@ -355,32 +355,11 @@ class TestLaggingSymbolsKeepTheirHistory:
         code = _code(run_once)
         assert "isin(lagging)" not in code, "落后标的的历史 bar 不能被整窗丢掉"
 
-    def test_a_symbol_without_todays_bar_still_ranks_on_earlier_days(self) -> None:
-        """行为测试：只要某天有该标的的指标行，那天的榜单就必须有它。"""
-        from pipeline.compute import compute_strength
-        from pipeline.config import load_config
-
-        cfg = load_config()
-        pool = {s.symbol: s.type for s in cfg.universe.symbols if s.enabled}
-        syms = sorted(pool)[:3]
-        older, today = date(2024, 6, 11), date(2024, 6, 12)
-
-        def row(sym: str, d: date, mom: float) -> dict[str, object]:
-            return {"symbol": sym, "date": d, "mom_20": mom, "extra": {}}
-
-        # 落后的是 syms[0]：它有 older 那天的行，没有 today 那天的行。
-        metrics: list[dict[str, object]] = [
-            row(syms[0], older, 5.0),
-            *[row(s, older, 1.0 + i) for i, s in enumerate(syms[1:])],
-            *[row(s, today, 1.0 + i) for i, s in enumerate(syms[1:])],
-        ]
-
-        older_rank = compute_strength(cfg, metrics, day=older, pool=pool)
-        assert syms[0] in {r["symbol"] for r in older_rank}, "历史那天必须还有它"
-        assert next(r for r in older_rank if r["symbol"] == syms[0])["rank"] == 1
-
-        today_rank = compute_strength(cfg, metrics, day=today, pool=pool)
-        assert syms[0] not in {r["symbol"] for r in today_rank}, "今天没有指标行 → 不进榜"
+    # 「落后标的的历史行仍然参与排名」这件事的**行为**测试在
+    # `test_run_once_behavior.py` 里。曾经放在这里的那条是**恒真**的：
+    # 它只 import compute_strength 自己拼一个 metrics 列表，从头到尾没碰过
+    # `run_once` —— 把 `prices[~prices["symbol"].isin(lagging)]` 原样加回去，
+    # 它照样绿。（顺带它还依赖 universe.yaml 里前三个字典序标的恰好都是 stock。）
 
 
 class TestTheReadTransactionIsActuallyReleased:
@@ -399,7 +378,13 @@ class TestTheReadTransactionIsActuallyReleased:
 
         src = inspect.getsource(run_once)
         after = src.split("_already_done(conn, session.date)", 1)[1]
-        head = after.split("# 3. 抓取整窗", 1)[0]
+        # **先断言分隔符还在。** `str.split` 在找不到分隔符时返回单元素列表，
+        # `[0]` 于是变成「从这里到函数末尾的全部源码」—— 那里面还有另外三处
+        # rollback，断言会**静默退化成恒真**。这个仓库已经三次栽在
+        # 「测试在散文上通过」上，这次不让它靠一句中文注释活着。
+        marker = "# 3. 抓取整窗"
+        assert marker in after, f"分隔符 {marker!r} 不在了，这条断言的作用域已经失效"
+        head = after.split(marker, 1)[0]
         assert head.count("conn.rollback()") >= 2, (
             "跳过分支一次、继续往下走的那条路也要一次 —— 注释承诺了就要有代码"
         )

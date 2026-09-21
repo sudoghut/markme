@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from psycopg import sql
+
 from pipeline.calendar_gate import (
     ET,
     interior_gaps,
@@ -121,6 +123,46 @@ def _existing_prices(
         return {
             (r[0], r[1]): {"close": r[2], "adj_close": r[3], "source": r[4]} for r in cur.fetchall()
         }
+
+
+def _carried_scores(
+    conn: psycopg.Connection[Any],
+    symbols: list[str],
+    start: date,
+    end: date,
+    column: str,
+) -> list[dict[str, Any]]:
+    """把**本跑没算出来**的那些 (symbol, date) 的排名分从库里取回来。
+
+    排名是**横截面**的，而 ``compute_strength`` 的输入是本跑内存里的
+    ``metrics`` 列表 —— 不是库。于是任何在本跑里整窗缺席的标的，
+    都会被从 ``rerank_days`` 覆盖的**每一天**的榜单里抹掉，其余名次集体上移，
+    而它在 ``metrics_daily`` 里那些天的分数**还好端端地在库里**。
+
+    整窗缺席有三条路，都不罕见：
+
+    - ``rejected``：跨源比对没过 / 拿不到第二意见（``fetch.py`` 把它从 frame 里剔除）
+    - ``missing``：yfinance 漏了一只而 Stooq 也失败
+    - 闸门 3 的落后标的（现在不再丢弃历史，但它仍可能缺最近几天）
+
+    损害是**永久**的：rerank 窗口每天右移一天，所以某标的在 D 那跑缺席时，
+    ``[D-400, D]`` 全被重写成「没有它」，而 ``D-400`` 在 D+1 的窗口之外 ——
+    再也不会被重排。一次日历修复把窗口左移几百天的话，一次性永久损坏几百天。
+
+    而所有涉及榜单的不变式都只对 ``max(date)`` 对账，历史那些天没有探测器。
+
+    取回来的行**只参与排名，不写库**（它们不在 ``metrics`` 里），
+    所以这不会把旧值重新发布一遍。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("select symbol, date, {col} from metrics_daily ").format(
+                col=sql.Identifier(column)
+            )
+            + sql.SQL("where symbol = any(%s) and date between %s and %s"),
+            (symbols, start, end),
+        )
+        return [{"symbol": r[0], "date": r[1], column: r[2]} for r in cur.fetchall()]
 
 
 def _already_done(conn: psycopg.Connection[Any], session_date: date) -> bool:
@@ -479,6 +521,30 @@ def run_once(
     # 4. 闸门 3：**逐标的**最新 bar 日期 == 当日 session
     latest = {str(sym): max(g["date"]) for sym, g in prices.groupby("symbol", sort=False)}
     lagging = stale_symbols({s: latest.get(s) for s in symbols}, session.date)
+    if len(lagging) == len(symbols):
+        # **「供应商全线故障」的另一半。**
+        #
+        # 删掉闸门 3 之后那次 `prices.empty` 检查时，我以为它只覆盖
+        # 「一行都没有」—— 那一半确实仍由上面的检查挡着。但它还覆盖着
+        # **所有标的都返回了陈旧 bar** 这一半：过滤之后 prices 会变空，
+        # 旧代码在那里 return，一个字都不写。现在不过滤了，prices 非空，
+        # 于是会一路走到底：
+        #
+        #   16 行全 NULL 的 metrics 写进 session.date
+        #     → 前端的 asOf 前进到今天 → 榜单查出 0 行而 ranks.ok 为真
+        #     → **HTTP 200、「数据截至 今天」、整页空白**（不是白屏，是看起来没事）
+        #   compute_strength 对那天返回 []
+        #     → replace_strength 无条件 delete 再插 0 行
+        #     → **那天已发布的榜单被删空**，而重跑时窗口已右移，再也不会被重排
+        #
+        # 判据从 `prices.empty` 换成「是不是全员落后」—— 那才是这一半的本名。
+        report.escalate("stale_vendor")
+        report.note(
+            f"全部 {len(symbols)} 只标的的最新 bar 都落后于 {session.date}，"
+            "跳过写入（不动已有数据）"
+        )
+        conn.rollback()
+        return report
     if lagging:
         bench = cfg.universe.benchmark
         # 已经是 partial 的话不要被覆盖回去（两者都 exit 1，但消息要留全）。
@@ -577,7 +643,17 @@ def run_once(
     # 以及由它们派生的 `days_in_top_n`。代码甚至**检测到了**因子变化，
     # 却只是记了一笔 —— 那正是「探测器响了但没人动手」。
     rerank_days = [s.date for s in sessions if write_from <= s.date <= session.date]
-    strength_by_day = {d: compute_strength(cfg, metrics, day=d, pool=pool) for d in rerank_days}
+    # **横截面要完整，否则重排等于把缺席者从历史里抹掉。** 见 _carried_scores。
+    computed = {(r["symbol"], r["date"]) for r in metrics}
+    carried = [
+        r
+        for r in _carried_scores(conn, symbols, write_from, session.date, cfg.strength.score_metric)
+        if (r["symbol"], r["date"]) not in computed
+    ]
+    if carried:
+        report.note(f"排名时从库里补回 {len(carried)} 个本跑未算出的横截面格子")
+    rank_input = [*metrics, *carried]
+    strength_by_day = {d: compute_strength(cfg, rank_input, day=d, pool=pool) for d in rerank_days}
 
     # 6. T2：一个原子单元
     existing = _existing_prices(conn, symbols, start, session.date)
@@ -600,8 +676,22 @@ def run_once(
         write_symbols(conn, symbol_rows(cfg))
         report.rows_prices = upsert_prices(conn, list(d.changed))
         report.rows_metrics = upsert_metrics(conn, metrics)
+        blanked: list[date] = []
         for day, rows in strength_by_day.items():
+            if not rows:
+                # `replace_strength` 是**无条件** delete 再插，所以拿 [] 调它
+                # 等于「删掉这一天已发布的榜单」。算不出横截面时该做的是
+                # **不动它**，而不是把它清空 —— §7.2 承诺「重跑、补跑…结果都一样」，
+                # 而「这一跑算不出来」不是「这一天本来就没有名次」。
+                # （预热区那些天本来就没有行，跳过它们是无操作。）
+                blanked.append(day)
+                continue
             replace_strength(conn, day, rows)
+        if blanked:
+            report.escalate("partial")
+            report.note(
+                f"{len(blanked)} 天算不出横截面，已跳过而非清空：{blanked[0]}…{blanked[-1]}"
+            )
 
     report.note(
         f"价格 {report.rows_prices} 行（{d.unchanged} 行未变）、指标 {report.rows_metrics} 行"

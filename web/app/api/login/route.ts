@@ -25,7 +25,16 @@ async function hmac(secret: string): Promise<string> {
  * 就是别人会照着抄的那种。
  */
 function safeNext(raw: FormDataEntryValue | null): string {
-  const v = String(raw ?? "");
+  // **先归一化，再校验，并返回归一化后的那一个。**
+  //
+  // 初版只做了下面三条检查就 `return v`，于是 `/<TAB>/evil.com` 整个穿过去了：
+  // WHATWG 的 URL 解析器在解析**之前**会把输入里所有的 tab(0x09)、
+  // LF(0x0A)、CR(0x0D) 先删掉，所以 `startsWith` 看到的是删之前的串
+  // （以单个 `/` 开头，放行），而 `new URL()` 看到的是删之后的 `//evil.com`
+  // —— 一个 authority。实测三种都能跳到 `https://evil.com/`。
+  //
+  // 只加检查不归一化等于没修：必须让校验和解析看到**同一个**字符串。
+  const v = String(raw ?? "").replace(/[\t\n\r]/g, "");
   // 以单个 `/` 开头才算站内：`//host` 和 `/\host` 都是协议相对地址。
   if (!v.startsWith("/") || v.startsWith("//") || v.startsWith("/\\")) return "/";
   return v;
