@@ -92,9 +92,15 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 
 ## 随时
 
-- **Action 的 SHA 钉版本会腐烂。** `actions/checkout` v4.2.2（2024-10）与
-  `setup-uv` v5.3.1（2025-02）都已偏旧，且跑在 node20 runtime 上。
-  已加 `.github/dependabot.yml` 的 `github-actions` 生态来产生更新信号。
+- ~~**Action 的 SHA 钉版本会腐烂。**~~ **2026-09-21 已还。** 那个信号机制起作用了：
+  dependabot 开了三个 PR，全部处理完（checkout v4.2.2 → v7.0.1、setup-uv v5.3.1 →
+  v10.1.0、gitleaks-action v2.3.7 → v3.0.0），并顺手把 dependabot 没覆盖到的
+  `setup-node` v4.1.0 → v7.0.0、`upload-artifact` v4.4.3 → v7.0.1 一起升了 ——
+  **Node 20 已于 2026-09-16 从 runner 上移除**，留在 v4 的那几个当时只是靠 runner
+  强制回退到 Node 24 才跑得起来，CI 每个 job 都在打弃用告警。
+  三个 dependabot SHA 与上游 tag 逐一核对过；升 gitleaks 之后单独做了一次
+  **告警测试**（一条会被命中的探针 → `secrets` 必须红），因为一个只会「不报错」的
+  密钥扫描器，绿灯恰恰是最危险的那种。
 - **`requires-python = ">=3.13"`。** 设计文档 §14 写的是 Python 3.12。
   已收紧到 3.13 与本机、CI、`uv.lock` 的解析标记一致 ——
   声明一个从来没被测过的 3.12 支持，是一句没人验证的承诺。
