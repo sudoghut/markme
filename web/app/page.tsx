@@ -10,6 +10,8 @@ import { PoolTable, type Row } from "@/components/PoolTable";
 import { TopThree } from "@/components/TopThree";
 import { EmptyDatabase, StaleBanner, failClosed } from "@/components/States";
 import { app, metrics as metricSpecs, strength, universe } from "@/lib/config";
+import { poolColumns } from "@/lib/columns";
+import { parseSort, sortRows } from "@/lib/sort";
 import { rest, type MetricRow, type PriceRow, type StrengthRow, type SymbolRow } from "@/lib/supabase";
 
 /**
@@ -53,8 +55,15 @@ function daysBetween(a: string, b: string): number {
   return Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000);
 }
 
-export default async function Dashboard() {
+export default async function Dashboard({
+  searchParams,
+}: {
+  // 排序状态住在 URL 里（`lib/sort.ts`）。页面本来就是 `force-dynamic`，
+  // 读 `searchParams` 不改变任何缓存语义 —— 数据仍然走 Data Cache。
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const R = app.revalidate_seconds;
+  const params = await searchParams;
 
   const symbols = await rest<SymbolRow>("symbols?select=symbol,name,type,enabled&enabled=eq.true&order=symbol", R);
   if (!symbols.ok) failClosed(symbols.reason, symbols.status);
@@ -110,7 +119,7 @@ export default async function Dashboard() {
     }
   }
 
-  const rows: Row[] = symbols.rows.map((s) => {
+  const unsorted: Row[] = symbols.rows.map((s) => {
     const p = latestPrice.get(s.symbol);
     // **只有当天的价格才算「最新价」。**
     //
@@ -135,6 +144,14 @@ export default async function Dashboard() {
       closeIsAdjusted: fresh ? p.close === null : false,
     };
   });
+
+  // 排序在**取完数之后、渲染之前**做一次。`symbols` 已经是按 symbol 升序取回来的，
+  // 所以默认排序（`DEFAULT_SORT`）排出来与不排完全一致 —— 不带参数的页面没有变化。
+  const extraColumns = metricSpecs
+    .filter((m) => m.core !== true)
+    .map((m) => ({ id: m.id, label: m.display.label, format: m.display.format }));
+  const sort = parseSort(params, poolColumns(extraColumns));
+  const rows = sortRows(unsorted, sort);
 
   // 顶部黄条：>1 个交易日未更新（§10.6）。
   //
@@ -161,9 +178,10 @@ export default async function Dashboard() {
           <PoolTable
             rows={rows}
             benchmark={universe.benchmark}
-            extraColumns={metricSpecs
-              .filter((m) => m.core !== true)
-              .map((m) => ({ id: m.id, label: m.display.label, format: m.display.format }))}
+            extraColumns={extraColumns}
+            sort={sort}
+            path="/"
+            params={params}
           />
         </section>
 

@@ -18,6 +18,8 @@
 import { PoolTable, type Row } from "@/components/PoolTable";
 import { EmptyDatabase, StaleBanner, UnavailableNotice, failClosed } from "@/components/States";
 import { metrics as metricSpecs, universe } from "@/lib/config";
+import { poolColumns } from "@/lib/columns";
+import { parseSort, sortRows } from "@/lib/sort";
 import type { MetricRow } from "@/lib/supabase";
 
 export const revalidate = false;
@@ -59,7 +61,13 @@ const DEMO_ROWS: Row[] = [
     metrics: null,
     rank: null,
     spark: [],
-    latestClose: null,
+    // **这个价格是故意填的，它不会被渲染出来**（整行走 colSpan 的「数据缺失」分支）。
+    // 它在这里是为了让排序的一条规则可以被肉眼验收：`metrics === null` 但
+    // `latestClose` 有值的行，按「最新价」降序时**必须仍然沉底**。
+    // 这个组合在真实管道里出得来（当天有价格、却没有 metrics 行），而 `sortValue`
+    // 一度把 `close` 取在缺失守卫之前 —— 那样这一行会顶在降序榜第一位，
+    // 屏幕上却写着「数据缺失」。没有这个值，那条规则在演示页上是看不见的。
+    latestClose: 92.3,
     closeIsAdjusted: false,
   },
   {
@@ -112,15 +120,24 @@ function Block({ title, note, children }: { title: string; note: string; childre
   );
 }
 
-export default async function States({ searchParams }: { searchParams: Promise<{ throw?: string }> }) {
+export default async function States({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
   // `?throw=1` 走**真的**失败路径：抛 DataUnavailableError → HTTP 500 → error.tsx。
   // 下面那一块只是把同一段文案静态渲染出来，看得见但拿不到状态码；
   // 要验「状态码也对」，得走这条。
-  if ((await searchParams).throw) failClosed("演示页的手动触发（不是真故障）", 503);
+  if (params.throw) failClosed("演示页的手动触发（不是真故障）", 503);
 
   const extraColumns = metricSpecs
     .filter((m) => m.core !== true)
     .map((m) => ({ id: m.id, label: m.display.label, format: m.display.format }));
+
+  // 演示页的表格也得能排 —— 它和首页是同一个组件，排序坏了要在这里看得见。
+  const sort = parseSort(params, poolColumns(extraColumns));
+  const demoRows = sortRows(DEMO_ROWS, sort);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
@@ -152,9 +169,16 @@ export default async function States({ searchParams }: { searchParams: Promise<{
 
       <Block
         title="③ 部分标的缺失 ＋ ④ 预热不足的灰标"
-        note="第二行是被闸门剔除的标的：显示「数据缺失」而不是空白。第三行历史不够长：数值照出，但打灰，并在 title 里说明原因 —— 出值但标灰，与 NULL 是两回事。第四行同样缺失、但仍在三强榜上（rank 与 metrics 是两条独立查询，这个组合真的会出现）—— 横着滚，那句文案会跟着标的列一起钉住，琥珀底纹也不掉。"
+        note="这张表可以点表头排序，所以下面按代号指行、不按第几行。DEMO-B 是被闸门剔除的标的：显示「数据缺失」而不是空白。DEMO-C 历史不够长：数值照出，但打灰，并在 title 里说明原因 —— 出值但标灰，与 NULL 是两回事。DEMO-D 同样缺失、但仍在三强榜上（rank 与 metrics 是两条独立查询，这个组合真的会出现）—— 横着滚，那句文案会跟着标的列一起钉住，琥珀底纹也不掉。排任一指标列，DEMO-B 与 DEMO-D 都会沉到最下面，两个方向都是 —— 注意 DEMO-B 在数据里其实有最新价，只是整行缺 metrics 所以不显示，按「最新价」排它照样沉底，那正是这一格要演示的东西。"
       >
-        <PoolTable rows={DEMO_ROWS} benchmark={universe.benchmark} extraColumns={extraColumns} />
+        <PoolTable
+          rows={demoRows}
+          benchmark={universe.benchmark}
+          extraColumns={extraColumns}
+          sort={sort}
+          path="/states"
+          params={params}
+        />
       </Block>
 
       <Block

@@ -101,8 +101,10 @@
   }
 }
 
-/* 「数据缺失」那句文案钉住时的落点 —— 冻结列右边缘的**上界**。
+/* 冻结列右边缘的**上界** ——「数据缺失」那句文案钉住时的落点。
    名字特意不叫「列宽」——**它不是列宽，也不能当列宽用**。
+   （旧名 `--frozen-note-left`；「7rem / 11rem 这个上界是怎么定的」那段论证
+   在 `docs/reviews/M4-M8.md` 里，按旧名字才 grep 得到。）
    CSS 读不到自动布局算出来的列宽，所以这里只能取一个实测出来的上界：
    实测（390 / 1280 两个视口 × `/` 与 `/states`）列宽是 86–97.3px 与 144.4–169.5px，
    故取 7rem / 11rem，保证落点永远在列的外侧。
@@ -116,8 +118,8 @@
    **不要反过来用它去定 `width`** —— 试过：给 `.frozen-col` 写死 `width` 会把
    桌面端每一行从 53px 撑到 69px（整张表高 30%），而手机上完全不起作用
    （那里列宽本来就被挤到内容宽度以下，写死的值是个哑元）。 */
-:root { --frozen-note-left: 7rem; }
-@media (min-width: 640px) { :root { --frozen-note-left: 11rem; } }
+:root { --frozen-col-edge: 7rem; }
+@media (min-width: 640px) { :root { --frozen-col-edge: 11rem; } }
 
 /* 「数据缺失」那一行只有一个 `colSpan` 单元格，文案从表格左边开始 ——
    **横向滚过去之后，整句会滑进冻结列背后**，屏幕上只剩「钉住的标的名 +
@@ -126,13 +128,13 @@
    冻结列把这个误读从「看不清」升级成了「看得很清楚但是错的」，所以文案自己也要钉住。
 
    `z-index` 与冻结列同级：正常情况下两者不重叠；万一列被内容撑得比
-   `--frozen-note-left` 宽，同级 + 文档顺序在后 → 文案压在列上面**露出来**，
+   `--frozen-col-edge` 宽，同级 + 文档顺序在后 → 文案压在列上面**露出来**，
    而不是悄悄消失。坏的时候要看得出来。
    底色也是为这一刻准备的：**没有底色的「压上去」是两层字叠印，两边都读不了**，
    那等于两个信息一起丢，比丢一个更糟。有底色时退化成「文案清楚、标的名被挡住」。 */
 .frozen-note {
   position: sticky;
-  left: var(--frozen-note-left);
+  left: var(--frozen-col-edge);
   z-index: 1;
   display: inline-block;
   @apply bg-ink-950;
@@ -149,7 +151,7 @@
    （实测 640 / 700 / 768 / 1024 四个宽度滚到最右端，整句都完整露在冻结列之外。）
 
    要不被推回去，得满足
-   `--frozen-note-left + max-width + 0.75rem ≤ 那条路上滚动容器的内容宽`。
+   `--frozen-col-edge + max-width + 0.75rem ≤ 那条路上滚动容器的内容宽`。
    末项是**单元格自己的 `pr-3`**，不是文案块的 `pl-3` —— 后者在 `max-width` 里面
    （preflight 是 `border-box`），别重复计一次。
 
@@ -163,5 +165,5 @@
    `pr-3`（12px）。于是 320/390 两个宽度在 `/` 与 `/states` 上都恰好落在界内。
    将来谁把表塞进更深的一层壳（侧栏、模态框），要回来把这 70px 调大。 */
 @media (max-width: 639px) {
-  .frozen-note { max-width: calc(100dvw - var(--frozen-note-left) - 70px); }
+  .frozen-note { max-width: calc(100dvw - var(--frozen-col-edge) - 70px); }
 }
