@@ -107,6 +107,10 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 - **`sharp` 的 libvips/libheif 漏洞**（`npm audit` 高危）。它是 Next 的
   可选依赖，本站**不用 `next/image`**，所以不在实际路径上。
   Next 自己钉的版本，只能等上游升。
+- **`heartbeat` 里的 `.heartbeat` 提交会打断正在跑的分支。** 这一轮为了验证备份，
+  手动 dispatch 了七八次，每次都往当时的分支推一个心跳 commit，于是本地 push
+  接连被拒。不影响正确性，但下次要在分支上反复 dispatch 它之前，
+  记得先想到这一点（或者把那次提交跳过）。
 - **Next 15.x 仍带着有漏洞的 `postcss`**（`npm audit` 说要升到 16.x 才干净）。
   那是构建期依赖，输入是我们自己仓库里的 CSS。升 Next 16 是一次单独的动作，
   不塞进这个 PR。

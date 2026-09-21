@@ -1935,6 +1935,23 @@ where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity;
 免费层的自动备份覆盖范围需实施时核实；
 一个月度 `pg_dump` 的 workflow 近乎免费，买的是「供应商历史口径也一起变了」时的后悔药。
 
+> **实施记录（2026-09-21）：这份备份一开始一次都没成功过。**
+> 手动 dispatch 一次 heartbeat 才发现（否则要到 10-01 第一次定时跑才暴露），
+> 一层层剥出五个问题：客户端 16 对不上服务端 17.6；runner 自带源里最新只到 16；
+> 装上 18 之后 `pg_wrapper` 仍按默认集群派发出 16；整库 dump 撞 Supabase 托管
+> schema 的权限；写入角色读不了序列。**而最后一层不是配置问题** ——
+> 六张表都开了 RLS，`pipeline_writer` 既不是 owner 也没有 BYPASSRLS，
+> 于是 pg_dump 拒绝导出。那个拒绝是对的：带 RLS 导出只会得到一份静默残缺的备份。
+>
+> 解法**不是**给 pg_dump 加 `--enable-row-security` 让它闭嘴，而是给备份一个够用
+> 的身份：`0002_backup_reader.sql` 建了一个**只读 + bypassrls**的专用角色，
+> 连接串存在 `MARKME_BACKUP_URL`。dump 只覆盖 `public` 与 `private`
+> —— `auth` 不是我们的，而且那里面是用户凭证，不该躺进一个保留 90 天的 artifact。
+>
+> workflow 末尾会 `pg_restore --list` 数一下带数据的表（期望 ≥ 8），
+> 因为「命令成功了」不等于「备份是完整的」：schema 导出来了、数据一行没有，
+> 同样是 exit 0。首次成功的产物：486 KB dump / 455 KB artifact。
+
 ---
 
 ## 10. 前端设计
