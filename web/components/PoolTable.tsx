@@ -23,12 +23,39 @@ export type Row = {
   closeIsAdjusted: boolean;
 };
 
-function Cell({ row, id, children }: { row: MetricRow | null; id: string; children: React.ReactNode }) {
+/**
+ * 一个指标单元格。
+ *
+ * **内容居中，但数字本身仍然右对齐。**
+ *
+ * 初版整列 `text-right`，于是「数字 + 条」那三列（距 EMA60 / RSI / β）的表头
+ * 被钉在整块的最右边，而数字在最左边 —— 实测表头偏离它所标注的数字
+ * 6.75–7.5rem，看上去根本不在这一列的中间。
+ *
+ * 光把表头改成居中还不够：那样表头会浮在数字和条之间的空处。
+ * 所以两头一起改 —— 单元格内容整块居中，表头也居中，于是表头正对着内容块的中心。
+ *
+ * 而纯数字列不能就这么居中：**居中会让数位参差**，一列数字就没法竖着扫了。
+ * 所以给它们套一个**定宽 + 右对齐**的内层（`numeric`），
+ * 内层右对齐保住数位对齐，外层居中保住表头对得上。两个都要。
+ */
+function Cell({
+  row,
+  id,
+  children,
+  numeric,
+}: {
+  row: MetricRow | null;
+  id: string;
+  children: React.ReactNode;
+  /** 纯数字列：给一个定宽，内部右对齐。留空表示内容自己是定宽块（如「数字 + 条」）。 */
+  numeric?: string;
+}) {
   // §3.3 软闸门 → §10.4 灰标。预热不足**出值但标灰**，与 NULL 是两回事。
   const prov = row ? isProvisional(row, id) : false;
   return (
-    <td className={`px-3 py-2 text-right ${prov ? "provisional" : ""}`} title={prov ? "预热不足，数值尚不稳定" : undefined}>
-      {children}
+    <td className={`px-3 py-2 text-center ${prov ? "provisional" : ""}`} title={prov ? "预热不足，数值尚不稳定" : undefined}>
+      {numeric ? <span className={`inline-block ${numeric} text-right`}>{children}</span> : children}
     </td>
   );
 }
@@ -64,16 +91,16 @@ export function PoolTable({
         <thead>
           <tr className="border-b border-ink-700 text-xs uppercase tracking-wide text-zinc-500">
             <th scope="col" className="px-3 py-2 text-left">标的</th>
-            <th scope="col" className="px-3 py-2 text-right">最新价</th>
-            <th scope="col" className="px-3 py-2 text-right">20日动量</th>
-            <th scope="col" className="px-3 py-2 text-left">60日走势</th>
-            <th scope="col" className="px-3 py-2 text-right">距 EMA60</th>
-            <th scope="col" className="px-3 py-2 text-right">RSI(14)</th>
-            <th scope="col" className="px-3 py-2 text-right">β</th>
-            <th scope="col" className="px-3 py-2 text-right">α(年化)</th>
-            <th scope="col" className="px-3 py-2 text-left">事件</th>
+            <th scope="col" className="px-3 py-2 text-center">最新价</th>
+            <th scope="col" className="px-3 py-2 text-center">20日动量</th>
+            <th scope="col" className="px-3 py-2 text-center">60日走势</th>
+            <th scope="col" className="px-3 py-2 text-center">距 EMA60</th>
+            <th scope="col" className="px-3 py-2 text-center">RSI(14)</th>
+            <th scope="col" className="px-3 py-2 text-center">β</th>
+            <th scope="col" className="px-3 py-2 text-center">α(年化)</th>
+            <th scope="col" className="px-3 py-2 text-center">事件</th>
             {extraColumns.map((c) => (
-              <th key={c.id} scope="col" className="px-3 py-2 text-right">
+              <th key={c.id} scope="col" className="px-3 py-2 text-center">
                 {c.label}
               </th>
             ))}
@@ -113,20 +140,20 @@ export function PoolTable({
                   </td>
                 ) : (
                   <>
-                    <td className="num px-3 py-2 text-right">
+                    <td className="num px-3 py-2 text-center">
                       {isMissing(r.latestClose) ? (
                         <Missing />
                       ) : (
-                        <span title={r.closeIsAdjusted ? "备源只提供复权价" : "未复权收盘价"}>
+                        <span className="inline-block w-20 text-right" title={r.closeIsAdjusted ? "备源只提供复权价" : "未复权收盘价"}>
                           {fmt(r.latestClose, "price")}
                           {r.closeIsAdjusted ? <sup className="ml-0.5 text-[10px] text-zinc-500">复权</sup> : null}
                         </span>
                       )}
                     </td>
-                    <Cell row={m} id="mom_20">
-                      <span className="num"><Signed value={metricValue(m, "mom_20")} spec="pct:2" /></span>
+                    <Cell row={m} id="mom_20" numeric="num w-16">
+                      <Signed value={metricValue(m, "mom_20")} spec="pct:2" />
                     </Cell>
-                    <td className="px-3 py-2">
+                    <td className="px-3 py-2 text-center">
                       <Sparkline points={r.spark} label={`${r.symbol} 近 ${r.spark.length} 个交易日复权收盘走势`} />
                     </td>
                     <Cell row={m} id="close_vs_ema60_pct">
@@ -138,15 +165,15 @@ export function PoolTable({
                     <Cell row={m} id="alpha_beta_126">
                       <BetaScale value={metricValue(m, "beta")} />
                     </Cell>
-                    <Cell row={m} id="alpha_beta_126">
+                    <Cell row={m} id="alpha_beta_126" numeric="num w-20">
                       <Alpha value={metricValue(m, "alpha_annual")} t={metricValue(m, "alpha_t_stat")} />
                     </Cell>
-                    <td className="px-3 py-2 text-left">
+                    <td className="px-3 py-2 text-center">
                       <NextEvent row={m} />
                     </td>
                     {extraColumns.map((c) => (
-                      <Cell key={c.id} row={m} id={c.id}>
-                        <span className="num">{fmt(metricValue(m, c.id), c.format)}</span>
+                      <Cell key={c.id} row={m} id={c.id} numeric="num w-16">
+                        {fmt(metricValue(m, c.id), c.format)}
                       </Cell>
                     ))}
                   </>
