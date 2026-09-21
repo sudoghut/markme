@@ -2,7 +2,10 @@ import type { Config } from "tailwindcss";
 
 // §10.4：深色优先、单一强调色、方向色不用红绿裸配。
 export default {
-  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
+  // `lib/` 也要扫：那里已经有「给 class 用」的判定（`format.ts` 的 `direction()`），
+  // 而 `globals.css` 的 `@layer components` 里的规则**要在 content 里扫到类名才会输出**。
+  // 把行类名的判断挪进 `lib/` 是个很自然的重构，扫不到就会静默少掉一条规则。
+  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
   darkMode: "class",
   theme: {
     extend: {
