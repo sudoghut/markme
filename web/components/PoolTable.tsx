@@ -83,24 +83,37 @@ export function PoolTable({
   extraColumns?: { id: string; label: string; format: string }[];
 }) {
   return (
-    <div className="overflow-x-auto">
+    // **纵向也必须是滚动容器**，不只是横向。
+    // sticky 钉的是「最近的滚动容器」—— 初版这里只有 `overflow-x-auto`，
+    // 那个框在纵向从不滚动，于是 `top: 0` 的表头会跟着整个框一起滚出屏幕。
+    // 给一个 `max-height` 把纵向滚动收进这个框，两个方向的冻结才同时成立。
+    // 用 `dvh` 不用 `vh`：手机上地址栏收起时 `vh` 是错的，表格会被切掉一截。
+    // 一个可滚动的框必须自己可聚焦，否则只有鼠标/手指能滚它（WCAG 2.1.1）。
+    <div
+      role="region"
+      aria-label="全池速览（表格可横向与纵向滚动）"
+      tabIndex={0}
+      className="max-h-[calc(100dvh-7rem)] overflow-auto"
+    >
       <table className="w-full min-w-[56rem] border-collapse text-sm">
         <caption className="sr-only">
           全池速览：每只标的的最新价、20 日动量、距 EMA60、RSI(14)、β、年化 α 与最近事件
         </caption>
         <thead>
-          <tr className="border-b border-ink-700 text-xs uppercase tracking-wide text-zinc-500">
-            <th scope="col" className="px-3 py-2 text-left">标的</th>
-            <th scope="col" className="px-3 py-2 text-center">最新价</th>
-            <th scope="col" className="px-3 py-2 text-center">20日动量</th>
-            <th scope="col" className="px-3 py-2 text-center">60日走势</th>
-            <th scope="col" className="px-3 py-2 text-center">距 EMA60</th>
-            <th scope="col" className="px-3 py-2 text-center">RSI(14)</th>
-            <th scope="col" className="px-3 py-2 text-center">β</th>
-            <th scope="col" className="px-3 py-2 text-center">α(年化)</th>
-            <th scope="col" className="px-3 py-2 text-center">事件</th>
+          {/* 表头那条下边框改由 `.frozen-head` 的 inset shadow 画 ——
+              `border-collapse` 的表里，sticky 单元格的 border 会跟着表滚走。 */}
+          <tr className="text-xs uppercase tracking-wide text-zinc-500">
+            <th scope="col" className="frozen-head frozen-col px-3 py-2 text-left">标的</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">最新价</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">20日动量</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">60日走势</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">距 EMA60</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">RSI(14)</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">β</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">α(年化)</th>
+            <th scope="col" className="frozen-head px-3 py-2 text-center">事件</th>
             {extraColumns.map((c) => (
-              <th key={c.id} scope="col" className="px-3 py-2 text-center">
+              <th key={c.id} scope="col" className="frozen-head px-3 py-2 text-center">
                 {c.label}
               </th>
             ))}
@@ -113,9 +126,11 @@ export function PoolTable({
             return (
               <tr
                 key={r.symbol}
-                className={`border-b border-ink-800/60 ${top3 ? "bg-accent/[0.06]" : ""}`}
+                // 琥珀底纹本身在 `globals.css` 的 `.top3`（components 层）里 ——
+                // 同一个值要在行、冻结列、缺失文案三处出现，写成三份就会漂。
+                className={`border-b border-ink-800/60 ${top3 ? "top3" : ""}`}
               >
-                <th scope="row" className="px-3 py-2 text-left font-normal">
+                <th scope="row" className="frozen-col px-3 py-2 text-left font-normal">
                   <span className="flex items-center gap-2">
                     {/* 轻量强调标记 —— 不是另起一块（§10.2） */}
                     {top3 ? (
@@ -135,8 +150,10 @@ export function PoolTable({
 
                 {m === null ? (
                   // §10.6「部分标的缺失」：该行显示「数据缺失」而非空白。
-                  <td className="px-3 py-2 text-left text-zinc-600" colSpan={8 + extraColumns.length}>
-                    数据缺失（该标的本次未能取得可信行情）
+                  // 文案外面那层 `.frozen-note` 不是装饰：横滚时它必须跟着冻结列一起钉住，
+                  // 否则这一行会在屏幕上变成「钉住的标的 + 钉住的指标名 + 一整行空白」。
+                  <td className="py-2 pr-3 text-left text-zinc-600" colSpan={8 + extraColumns.length}>
+                    <span className="frozen-note pl-3">数据缺失（该标的本次未能取得可信行情）</span>
                   </td>
                 ) : (
                   <>

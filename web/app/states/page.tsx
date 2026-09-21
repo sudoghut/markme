@@ -75,6 +75,31 @@ const DEMO_ROWS: Row[] = [
     latestClose: 41.08,
     closeIsAdjusted: true,
   },
+  {
+    // **三强 + 数据缺失**：这个组合真的会出现 —— `rank` 来自 `v_strength_enriched`，
+    // 与 `metrics` 是两条独立的查询，`page.tsx` 只用「价格是不是当天的」闸住了
+    // `metrics`，没闸住 `rank`。于是一只价格落后、但强度视图里仍在榜的标的
+    // 会同时拿到 `in_top_n` 和 `metrics === null`。
+    // 它是唯一能看见 `.top3 .frozen-note`（缺失文案在三强行上的琥珀重放）的路径 ——
+    // 靠等这次事故来验收，等于没验收过（§10.6）。
+    symbol: "DEMO-D",
+    name: "仍在榜、但价格落后的标的",
+    metrics: null,
+    rank: {
+      date: "2026-09-18",
+      symbol: "DEMO-D",
+      rank: 2,
+      score: null,
+      in_top_n: true,
+      delta_to_next: null,
+      delta_to_median: null,
+      days_in_top_n: null,
+      rank_delta_1d: null,
+    },
+    spark: [],
+    latestClose: null,
+    closeIsAdjusted: false,
+  },
 ];
 
 function Block({ title, note, children }: { title: string; note: string; children: React.ReactNode }) {
@@ -127,7 +152,7 @@ export default async function States({ searchParams }: { searchParams: Promise<{
 
       <Block
         title="③ 部分标的缺失 ＋ ④ 预热不足的灰标"
-        note="第二行是被闸门剔除的标的：显示「数据缺失」而不是空白。第三行历史不够长：数值照出，但打灰，并在 title 里说明原因 —— 出值但标灰，与 NULL 是两回事。"
+        note="第二行是被闸门剔除的标的：显示「数据缺失」而不是空白。第三行历史不够长：数值照出，但打灰，并在 title 里说明原因 —— 出值但标灰，与 NULL 是两回事。第四行同样缺失、但仍在三强榜上（rank 与 metrics 是两条独立查询，这个组合真的会出现）—— 横着滚，那句文案会跟着标的列一起钉住，琥珀底纹也不掉。"
       >
         <PoolTable rows={DEMO_ROWS} benchmark={universe.benchmark} extraColumns={extraColumns} />
       </Block>
