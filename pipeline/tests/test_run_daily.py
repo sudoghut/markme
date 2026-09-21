@@ -170,7 +170,9 @@ class TestStatusEscalation:
 
 
 class TestRevalidation:
-    def test_protection_bypass_is_forwarded_when_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_protection_bypass_is_forwarded_when_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Vercel 会在 Route Handler 之前拦请求；daily 必须转发 CI bypass。"""
         import urllib.request
 
@@ -184,7 +186,7 @@ class TestRevalidation:
         class Response:
             status = 200
 
-            def __enter__(self) -> "Response":
+            def __enter__(self) -> Response:
                 return self
 
             def __exit__(self, *args: object) -> None:
