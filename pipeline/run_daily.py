@@ -300,11 +300,13 @@ def revalidate_site(report: RunReport) -> None:
 
     base = os.environ.get("SITE_URL", "").rstrip("/")
     token = os.environ.get("REVALIDATE_TOKEN", "")
+    bypass = os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET", "")
     if not base or not token:
         return
     url = f"{base}/api/revalidate?token={token}"
     try:
-        req = urllib.request.Request(url, data=b"", method="POST")  # noqa: S310
+        headers = {"x-vercel-protection-bypass": bypass} if bypass else {}
+        req = urllib.request.Request(url, data=b"", headers=headers, method="POST")  # noqa: S310
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
             status = resp.status
     except urllib.error.HTTPError as e:

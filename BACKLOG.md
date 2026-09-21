@@ -85,8 +85,8 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   这一类故障目前**没有探测器**，只有 `keepalive.yml` 每天那次站点健康检查。
 
 - **为受 Vercel Deployment Protection 保护的 production 配置健康检查 bypass。**
-  `keepalive.yml` 已在 GitHub secret `VERCEL_AUTOMATION_BYPASS_SECRET` 存在时发送
-  `x-vercel-protection-bypass`；需由项目管理员在 Vercel 创建一个仅供 CI 使用的
+  `keepalive.yml` 与 daily 的按需重验证已在 GitHub secret
+  `VERCEL_AUTOMATION_BYPASS_SECRET` 存在时发送 `x-vercel-protection-bypass`；需由项目管理员在 Vercel 创建一个仅供 CI 使用的
   Protection Bypass for Automation secret，并同步到 GitHub。否则若 production 开启
   Vercel Authentication / Password Protection，健康检查会在到达 `/api/health` 前被拦住。
 

@@ -1246,8 +1246,9 @@ Supabase 项目被暂停 —— 产出的正是沉默，在这个设计里**与�
    （若采纳 §10.1 的按需 revalidate，再加一条 `REVALIDATE_TOKEN`，两边同值。）
 4. 若 production 启用 Vercel Deployment Protection，在 Vercel 创建一个仅供 CI 使用的
    Protection Bypass for Automation secret，并作为 GitHub Secret
-   `VERCEL_AUTOMATION_BYPASS_SECRET` 保存；`keepalive.yml` 只在该值存在时发送
-   `x-vercel-protection-bypass`。否则健康检查会在到达 `/api/health` 前被拦住。
+   `VERCEL_AUTOMATION_BYPASS_SECRET` 保存；`keepalive.yml` 与 daily 的按需
+   revalidate 都只在该值存在时发送 `x-vercel-protection-bypass`。否则健康检查和
+   revalidate 请求都会在到达各自 Route Handler 前被拦住。
 5. 无需数据源密钥（yfinance / Stooq 都不要）。若将来升级 Tiingo 再加一条 Secret。
 
 **最省事的顺序**：你建好那个 Supabase 项目 → 自己把 Secret 填进 GitHub →
