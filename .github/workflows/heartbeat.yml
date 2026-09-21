@@ -57,9 +57,56 @@ jobs:
         env:
           MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          # **这个月度备份在修好之前一次都没成功过。**
+          # `apt-get install postgresql-client` 在 ubuntu-24.04 上装到的是 16，
+          # 而 Supabase 的服务端是 17.6，于是 pg_dump 直接拒绝：
+          #   `aborting because of server version mismatch`
+          # 2026-09-21 手动 dispatch 一次才撞见 —— 否则要等 10 月 1 号第一次
+          # 定时跑才会暴露，而 §9.4 把这份 dump 当「后悔药」在论证。
+          #
+          # 规则是 **pg_dump 的大版本必须 ≥ 服务端**（反方向才是支持的：
+          # 新客户端可以 dump 旧服务端）。所以：
+          #   1. runner 自带的源里最新只到 16（实测），先按 PostgreSQL 官方文档
+          #      把 PGDG 源加进来；
+          #   2. 从里面取**最新**的那个 `postgresql-client-NN`，而不是钉死 17 ——
+          #      服务端哪天升到 18，钉死 17 的那份会以同样的方式再红一次。
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc             -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main"             | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          PGV=$(apt-cache search --names-only '^postgresql-client-[0-9]+$' | awk '{print $1}' | sed 's/.*-//' | sort -n | tail -1)
+          echo "服务端 17.6；PGDG 里最新的客户端大版本：$PGV"
+          # 取不到、或取到的比服务端还旧，就**立刻停**，而不是让 pg_dump 去撞
+          # 那条 version mismatch —— 失败信息要说清楚是哪一步不成立。
+          test -n "$PGV" && [ "$PGV" -ge 17 ] || { echo "拿不到 >=17 的 pg_dump 客户端（PGV=$PGV）"; exit 1; }
+          sudo apt-get install -y -qq "postgresql-client-$PGV"
+          # **必须走版本化的那个二进制，不能直接叫 `pg_dump`。**
+          # Debian/Ubuntu 的 `/usr/bin/pg_dump` 是 `pg_wrapper` 的软链，它按
+          # **默认集群**的版本派发 —— runner 上装着 postgresql-16，所以哪怕
+          # 刚装完 18，`pg_dump --version` 报的仍是 16.15，照样撞 mismatch。
+          # （实测踩过：加完 PGDG 源、装上 18.6 之后仍然失败，就是卡在这里。）
+          PGBIN="/usr/lib/postgresql/$PGV/bin/pg_dump"
+          "$PGBIN" --version
           mkdir -p /tmp/backup
-          pg_dump --no-owner --no-privileges --format=custom             --file="/tmp/backup/markme-$(date -u +'%Y-%m').dump" "$MARKME_DB_URL"
+          # **只 dump 我们自己的两个 schema。** 整库 dump 会在 Supabase 的托管
+          # schema 上直接失败（实测：`permission denied for schema auth`），
+          # 而且就算有权限也不该备 —— `auth` 里是用户凭证，不该躺在一个
+          # 保留 90 天的 artifact 里。§9.4 要的后悔药是**我们的数据**：
+          # `public`（六张表 + 视图）与 `private`（runs / fetch_state）。
+          # **跳过所有序列的「当前值」。** 写入角色能往表里插数据，却没有 SELECT
+          # 序列当前值的权限（实测先后撞上 `private.runs_id_seq`、
+          # `public.symbol_events_id_seq` —— 不是个别序列，是对序列整体没有 SELECT）。
+          # 跳过的只是序列的**数据**，序列对象本身照常进 dump，所以列上的
+          # DEFAULT 不会悬空。
+          #
+          # **但恢复时必须补一步 `setval`**：否则 `nextval` 从 1 开始，而表里
+          # 已经有 1..N 行，下一次插入会撞主键。恢复手册里的一行：
+          #   select setval(pg_get_serial_sequence(t, c), (select max(c) from t));
+          # 对 `public.symbol_events` 与 `private.runs` 各跑一次。
+          #
+          # 真正干净的解法是给那个角色补一条 `grant select on all sequences`，
+          # 但那要动生产授权（§9.3 把授权当安全边界），单独决定 —— 已记进 BACKLOG。
+          "$PGBIN" --no-owner --no-privileges --format=custom --schema=public --schema=private --exclude-table-data='public.*_seq' --exclude-table-data='private.*_seq' --file="/tmp/backup/markme-$(date -u +'%Y-%m').dump" "$MARKME_DB_URL"
           ls -la /tmp/backup
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.cfg.outputs.have == 'yes'
