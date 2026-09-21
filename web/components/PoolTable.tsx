@@ -10,6 +10,9 @@
  */
 import { Alpha, BetaScale, DivergingBar, EventChip, Missing, RsiBar, Signed, Sparkline } from "./widgets";
 import { isProvisional, metricValue } from "@/lib/metricValue";
+import { nextEvent } from "@/lib/nextEvent";
+import { poolColumns, type ExtraColumn, type PoolColumn } from "@/lib/columns";
+import { defaultDir, nextSort, sortHref, type SortState } from "@/lib/sort";
 import { EM_DASH, fmt, isMissing } from "@/lib/format";
 import type { MetricRow, PriceRow, StrengthRow, SymbolRow } from "@/lib/supabase";
 
@@ -61,6 +64,81 @@ function Cell({
 }
 
 /**
+ * 一个可排序的表头（§10.2「17 行**可排序**表格」）。
+ *
+ * **它是链接，不是按钮**，因为排序状态住在 URL 里（见 `lib/sort.ts` 的文件头）。
+ * 于是**不出货一个字节的客户端 JS**（实测 First Load JS 仍是 103 kB）就有了：
+ * 可分享的排序、能用的后退键、以及关掉 JS 照样能排。
+ *
+ * 三件与 §10.4 直接相关的事：
+ *
+ * - **箭头不是靠颜色说话。** 当前列换的是字形（`▲`/`▼` 对 `⇅`）**和**亮度，
+ *   任一单独都够用 —— §10.4「永不单靠颜色传达方向」。
+ * - **强调色不能用在这里。** 琥珀是「今日三强」这一个语义的专用色（§10.4
+ *   「单一强调色」），排序状态借它一用，那个语义就被稀释了。所以用中性的亮度差。
+ * - **静默列的 `⇅` 压到最暗。** §10.4 说过「表格里每多一块东西都在和数字抢注意力」，
+ *   而这是一次给每一列都加一块东西的改动 —— 不压暗就是十个小图标在和数字抢。
+ */
+function SortHeader({
+  col,
+  frozenCorner,
+  sort,
+  href,
+}: {
+  col: PoolColumn;
+  /** 左上角那一格同时属于冻结的行与列。 */
+  frozenCorner: boolean;
+  sort: SortState;
+  href: string;
+}) {
+  const active = sort.key === col.id;
+  const nextWord = (active ? (sort.dir === "asc" ? "desc" : "asc") : defaultDir(col.id)) === "asc" ? "升序" : "降序";
+  return (
+    <th
+      scope="col"
+      // `aria-sort` 是屏幕阅读器读到「这一列正被排序」的**唯一**途径 ——
+      // 箭头是 `aria-hidden` 的装饰，它自己不说明任何事。
+      aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+      className={`frozen-head ${frozenCorner ? "frozen-col " : ""}px-3 py-2 ${col.align === "left" ? "text-left" : "text-center"}`}
+    >
+      <a
+        href={href}
+        // **裸 `<a>`，不是 `next/link`。** 初版用了 Link，实测它把路由运行时
+        // 第一次拉进主包：`/` 与 `/states` 的 First Load JS 从 103 kB 涨到
+        // **106 kB**（多出来的 chunk 8.5 KB raw / 3.4 KB gzip），而这个方案
+        // 全部的卖点就是「不加客户端 JS」—— 用 Link 等于一边说零成本一边收 3.4KB。
+        // 换成整页导航之后回到 103 kB，并且与站内其余链接（方法论、演示态）写法一致。
+        // 代价是每次排序一次整页加载：页面本来就是 `force-dynamic`，
+        // 数据仍走 Data Cache，那一次请求**不打数据源**。
+        // **整页加载真正的代价不是那次请求，是新文档会把表格框的横向位置和
+        // 键盘焦点清零**（软导航时 React 复用同一个 DOM 节点，两样都保得住）。
+        // 手机上于是要多滑两下才能看到自己刚排的那一列。**这个代价是选来的**：
+        // 试过用 `#` 锚点把位置要回来，它确实修好了横向，但同时把整个文档往下
+        // 拖了 141px，§10.6 的陈旧黄条和「数据截至」双双出视野 —— 而排序链接
+        // 可分享正是这套方案的卖点，收到链接的人第一屏就看不到「管道停了」。
+        // 详细的测量与为什么 `scroll-margin-top` 救不了它，见 §10.2 的取舍块。
+        title={col.sortNote}
+        // `whitespace-nowrap`：加了箭头之后「20日动量」「60日走势」会折成两行，
+        // 把表头撑高、也把上一轮刚对齐好的「表头对准内容块中心」又搞歪。
+        className={`inline-flex items-baseline gap-1 whitespace-nowrap underline-offset-4 hover:underline ${active ? "text-zinc-200" : ""}`}
+      >
+        <span>{col.label}</span>
+        <span aria-hidden="true" className={`text-[9px] ${active ? "" : "text-zinc-700"}`}>
+          {/* **不要用 `↕`（U+2195）**：它在 emoji 集里，实测被渲染成一个蓝色
+              emoji 方块 —— 在一个「单一强调色、其余全中性」的表里格外刺眼，
+              而且它比它标注的数字还抢眼。`⇅`（U+21C5）不在 emoji 集里，
+              和 `▲`/`▼` 一样走文本渲染。 */}
+          {active ? (sort.dir === "asc" ? "▲" : "▼") : "⇅"}
+        </span>
+        <span className="sr-only">
+          {`：按此列${nextWord}排列${col.sortNote ? `（${col.sortNote}）` : ""}`}
+        </span>
+      </a>
+    </th>
+  );
+}
+
+/**
  * 非 core 的指标住在 `metrics_daily.extra` 里（§9.2），表格为它们**自动**追加列。
  *
  * 这是 M6 的一条验收标准，而它背后是 §3.6 的承诺：
@@ -77,11 +155,21 @@ export function PoolTable({
   rows,
   benchmark,
   extraColumns = [],
+  sort,
+  path,
+  params,
 }: {
   rows: Row[];
   benchmark: string;
-  extraColumns?: { id: string; label: string; format: string }[];
+  extraColumns?: ExtraColumn[];
+  /** 当前排序状态（由页面从 URL 解析，见 `lib/sort.ts`）。 */
+  sort: SortState;
+  /** 表头链接的基准路径与要原样带走的其余查询参数。 */
+  path: string;
+  params: Record<string, string | string[] | undefined>;
 }) {
+  // 列定义只有一份（`lib/columns.ts`）：表头、排序白名单、缺失行的 colSpan 都读它。
+  const columns = poolColumns(extraColumns);
   return (
     // **纵向也必须是滚动容器**，不只是横向。
     // sticky 钉的是「最近的滚动容器」—— 初版这里只有 `overflow-x-auto`，
@@ -103,19 +191,14 @@ export function PoolTable({
           {/* 表头那条下边框改由 `.frozen-head` 的 inset shadow 画 ——
               `border-collapse` 的表里，sticky 单元格的 border 会跟着表滚走。 */}
           <tr className="text-xs uppercase tracking-wide text-zinc-500">
-            <th scope="col" className="frozen-head frozen-col px-3 py-2 text-left">标的</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">最新价</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">20日动量</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">60日走势</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">距 EMA60</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">RSI(14)</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">β</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">α(年化)</th>
-            <th scope="col" className="frozen-head px-3 py-2 text-center">事件</th>
-            {extraColumns.map((c) => (
-              <th key={c.id} scope="col" className="frozen-head px-3 py-2 text-center">
-                {c.label}
-              </th>
+            {columns.map((c, i) => (
+              <SortHeader
+                key={c.id}
+                col={c}
+                frozenCorner={i === 0}
+                sort={sort}
+                href={sortHref(path, params, nextSort(sort, c.id))}
+              />
             ))}
           </tr>
         </thead>
@@ -152,7 +235,7 @@ export function PoolTable({
                   // §10.6「部分标的缺失」：该行显示「数据缺失」而非空白。
                   // 文案外面那层 `.frozen-note` 不是装饰：横滚时它必须跟着冻结列一起钉住，
                   // 否则这一行会在屏幕上变成「钉住的标的 + 钉住的指标名 + 一整行空白」。
-                  <td className="py-2 pr-3 text-left text-zinc-600" colSpan={8 + extraColumns.length}>
+                  <td className="py-2 pr-3 text-left text-zinc-600" colSpan={columns.length - 1}>
                     <span className="frozen-note pl-3">数据缺失（该标的本次未能取得可信行情）</span>
                   </td>
                 ) : (
@@ -207,16 +290,13 @@ export function PoolTable({
 /**
  * 「事件」列只显示**最近的一个即将发生的**事件倒数芯片（§10.2）。
  * 四个距离的完整值放行内展开。
+ *
+ * 挑哪个事件的逻辑搬到了 `lib/nextEvent.ts` —— **这一列的排序键读的是同一个函数**。
+ * 各算各的话，按天数排出来的顺序会和芯片上印的天数对不上，而那种错每一行
+ * 单独看都是对的。
  */
 function NextEvent({ row }: { row: MetricRow }) {
-  const e = metricValue(row, "days_to_next_earnings");
-  const d = metricValue(row, "days_to_next_dividend");
-  const pick =
-    e !== null && (d === null || e <= d)
-      ? { days: e, kind: "财报", est: row["next_earnings_is_estimated"] as boolean | null }
-      : d !== null
-        ? { days: d, kind: "除息", est: row["next_dividend_is_estimated"] as boolean | null }
-        : null;
+  const pick = nextEvent(row);
   if (!pick) return <span className="text-zinc-600">{EM_DASH}</span>;
-  return <EventChip days={pick.days} kind={pick.kind} estimated={pick.est} />;
+  return <EventChip days={pick.days} kind={pick.kind} estimated={pick.estimated} />;
 }

@@ -74,6 +74,18 @@ export default function Methodology() {
         一个不显著的 α 在视觉上不该和一个显著的 α 长得一样。
       </p>
 
+      <h2 className="mt-8 text-base font-medium text-zinc-200">表格排序的口径</h2>
+      <p className="mt-2 text-zinc-400">
+        点表头可以按任一列排序。两列的排序键不是它字面上画的东西，写在这里：
+        <strong className="text-zinc-300">60 日走势</strong>按那条线的首末涨跌排；
+        <strong className="text-zinc-300">事件</strong>按芯片上那个天数排，首次点击是最近的在前。
+      </p>
+      <p className="mt-2 text-zinc-400">
+        <strong className="text-zinc-300">没有值的行永远沉到最下面，不随升降序翻转。</strong>
+        否则降序时一排破折号会顶在最上面 —— 那读起来就是「这几只最高」，
+        而它们其实是没有值。同值时按标的字母兜底，所以同一个链接永远给同一个顺序。
+      </p>
+
       <h2 className="mt-8 text-base font-medium text-zinc-200">那道口令</h2>
       <p className="mt-2 text-zinc-400">
         站点入口的口令是<strong className="text-zinc-300">象征性</strong>的，<strong className="text-zinc-300">不是安全边界</strong>。
