@@ -89,7 +89,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          # **读 `web/package.json` 的 `engines.node`，不在这里再写一个数字。**
+          # Node 的版本原本有三处各说各的：这里写 22、Vercel 的项目设置是 24.x、
+          # 开发机是 24 —— 而这个 job 存在的全部理由是「编译不过的前端不该合进
+          # main」，它却在测一个**生产不用的大版本**。两边差一个大版本时，
+          # 只在 24 上炸的构建能一路绿灯进生产，反过来也一样。
+          # `engines.node` 是 Vercel 和 setup-node **都**认的那一份，所以它当真相。
+          node-version-file: web/package.json
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
