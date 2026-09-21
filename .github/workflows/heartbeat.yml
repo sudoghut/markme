@@ -99,6 +99,14 @@ jobs:
           # `public`（六张表 + 视图）与 `private`（runs / fetch_state）。
           "$PGBIN" --no-owner --no-privileges --format=custom --schema=public --schema=private --file="/tmp/backup/markme-$(date -u +'%Y-%m').dump" "$MARKME_BACKUP_URL"
           ls -la /tmp/backup
+          # **别只看「命令成功了」。** 这一步的价值在于产出一份**完整**的备份，
+          # 而「schema 导出来了、数据一行没有」同样会以 exit 0 结束。
+          # 所以数一下 dump 里真正带数据的表：public 六张 + private 两张 = 8。
+          # （视图没有 TABLE DATA，不计。）少一张就红 —— 漏掉一张表的备份，
+          # 比没有备份更危险：它看起来是一份备份。
+          N=$("/usr/lib/postgresql/$PGV/bin/pg_restore" --list "/tmp/backup/markme-$(date -u +'%Y-%m').dump" | grep -c 'TABLE DATA')
+          echo "dump 里带数据的表：$N"
+          [ "$N" -ge 8 ] || { echo "备份不完整：期望 >= 8 张（public 六张 + private 两张），实际 $N"; exit 1; }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.cfg.outputs.have == 'yes'
         with:
