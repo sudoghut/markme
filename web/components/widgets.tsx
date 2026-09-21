@@ -86,42 +86,29 @@ export function BetaScale({ value }: { value: number | null }) {
 }
 
 /**
- * α → 带符号数值 + 显著性角标。
+ * α → 带符号数值；`|t| < 2` **只降透明度**，不加文字标签。
  *
  * 这是 §10.4 里最要紧的一个诚实标注：一个不显著的 α 在视觉上
  * 不该和一个显著的 α 长得一样。
  *
- * **`opacity-60` 只加在数字上，不加在角标上。**
+ * 曾经这里还挂一个「未显著」微标签。**拿掉了** —— 用户的判断是
+ * 「两倍一眼就能看出来」：α 是否跨过 |t|≥2 这条线，调暗本身已经说清楚了，
+ * 再加三个字是把同一件事讲两遍，而表格里每多一块东西都在和数字抢注意力。
  *
- * 初版把它加在外层 span 上，于是整个单元格一起变暗 —— 包括那个角标。
- * 实测对比度：角标文字 1.99:1、角标底色对页面 1.09:1
- * （zinc-500 与 ink-800 在 60% 不透明度下压到 ink-950 上）。
- * 也就是说**它在 DOM 里，但人眼看不见**，读起来只是一行普通文字。
+ * 信息没有丢：`t` 的具体值移到了数字自己的 tooltip 上，悬停即见。
+ * 文档 §10.4 已同步改掉那句「并加『未显著』微标签」。
  *
- * 而这个角标的全部职责就是说「这个数字是噪声，别当真」——
- * 让「不可信」这个样式把「不可信」这个标记本身也抹掉，
- * 恰好是 §10.4「诚实优先于漂亮」要防的那种反讽。
- *
- * 现在：数字变暗（它才是信不过的那个），角标保持不透明并提亮到 11.21:1，
- * 加一圈边框让它在深色背景上真的像一块角标。
+ * （另记一笔：标签在的时候它其实是**看不见**的 —— `opacity-60` 加在外层，
+ * 把标签一起压到 1.99:1 的对比度。先修好了它才发现它根本不该在。）
  */
 export function Alpha({ value, t }: { value: number | null; t: number | null }) {
   if (isMissing(value)) return <Missing />;
   const weak = isMissing(t) || Math.abs(t as number) < 2;
+  if (!weak) return <Signed value={value} spec="pct:1" />;
   const why = isMissing(t) ? "无 t 值" : `t = ${(t as number).toFixed(2)}`;
   return (
-    <span className="inline-flex items-center justify-end gap-1 whitespace-nowrap">
-      <span className={weak ? "opacity-60" : ""}>
-        <Signed value={value} spec="pct:1" />
-      </span>
-      {weak ? (
-        <span
-          className="shrink-0 rounded border border-ink-700 bg-ink-800 px-1 text-[10px] leading-4 text-zinc-300"
-          title={`${why}；|t| < 2，这个 α 与 0 区分不开`}
-        >
-          未显著
-        </span>
-      ) : null}
+    <span className="opacity-60" title={`${why}；|t| < 2，这个 α 与 0 区分不开`}>
+      <Signed value={value} spec="pct:1" />
     </span>
   );
 }

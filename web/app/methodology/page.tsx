@@ -69,7 +69,8 @@ export default function Methodology() {
         本站绝不用 0 或上一日的值冒充一个缺失值。
       </p>
       <p className="mt-2 text-zinc-400">
-        α 的 <code>|t| &lt; 2</code> 时会降透明度并标「未显著」。
+        α 的 <code>|t| &lt; 2</code> 时会<strong className="text-zinc-300">降透明度</strong> —— 它与 0
+        区分不开；悬停可看 <code>t</code> 的具体值。
         一个不显著的 α 在视觉上不该和一个显著的 α 长得一样。
       </p>
 
