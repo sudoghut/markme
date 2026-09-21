@@ -59,6 +59,9 @@ jobs:
           # §10.1 的按需重验证。两者缺一就静默跳过。
           SITE_URL: ${{ vars.SITE_URL }}
           REVALIDATE_TOKEN: ${{ secrets.REVALIDATE_TOKEN }}
+          # production 开启 Vercel Deployment Protection 时，供 revalidate_site()
+          # 在到达 Route Handler 前绕过保护；未配置时不发送该 header。
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: uv run python -m pipeline.run_daily ${{ inputs.force && '--force' || '' }}
 
       - name: 有没有配 HEALTHCHECK_URL

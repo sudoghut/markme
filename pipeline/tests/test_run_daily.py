@@ -169,6 +169,40 @@ class TestStatusEscalation:
         assert r.status == "stale_vendor", "同级不互相覆盖，消息都留在 messages 里"
 
 
+class TestRevalidation:
+    def test_protection_bypass_is_forwarded_when_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Vercel 会在 Route Handler 之前拦请求；daily 必须转发 CI bypass。"""
+        import urllib.request
+
+        from pipeline.run_daily import revalidate_site
+
+        monkeypatch.setenv("SITE_URL", "https://markme.example/")
+        monkeypatch.setenv("REVALIDATE_TOKEN", "revalidate-token")
+        monkeypatch.setenv("VERCEL_AUTOMATION_BYPASS_SECRET", "bypass-token")
+        seen: dict[str, str] = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        def open_(req: urllib.request.Request, *, timeout: int) -> Response:
+            seen.update(dict(req.header_items()))
+            assert timeout == 30
+            return Response()
+
+        monkeypatch.setattr(urllib.request, "urlopen", open_)
+        report = RunReport(status="ok")
+        revalidate_site(report)
+
+        assert seen["X-vercel-protection-bypass"] == "bypass-token"
+        assert report.status == "ok"
+
+
 class TestEventsStalePublishesNulls:
     """§3.5(4)：事件抓取失败时「核心价格与四个核心指标照常写入，**事件列写 NULL**」。
 
