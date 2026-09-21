@@ -53,6 +53,7 @@ uv run python -m pipeline.check_invariants   # 线上数据库的 19 条不变�
 | [AGENTS.md](AGENTS.md) | 仓库约定：目录规范、skills 位置、review 闸门、独立性 |
 | [docs/create-project.md](docs/create-project.md) | 项目从零到上线的建设计划（指标口径、架构、数据库与 RLS、前端设计、里程碑） |
 | [docs/reviews/](docs/reviews/) | 各里程碑的 review 闸门记录 |
+| [skills/](skills/) | 可复用的 agent skill（与具体 agent 无关，不放 `.claude/`） |
 
 ### 计划文档清单
 
