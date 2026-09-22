@@ -367,6 +367,15 @@ class SiteConfig(_Strict):
     title: str = Field(min_length=1)
     subtitle: str = Field(min_length=1)
     disclaimer: str = Field(min_length=1)
+    # 只有前端用得上，但**必须声明**：``_Strict`` 是 ``extra="forbid"``，
+    # 漏掉它会让整个管道在加载 config 时炸掉 —— 一个纯前端的改动
+    # 把收盘后的抓取打死，而两边看不出任何关联。实测过：漏掉这一行时
+    # ``load_config()`` 第一句就抛，``run_daily`` / ``backfill`` 全停。
+    #
+    # ``^https://`` 是一道 **CI 期**的护栏：pytest 会加载真实的 ``config/``，
+    # 所以一个 ``javascript:`` 值过不了 PR。它**不是**前端的运行时校验 ——
+    # ``web/lib/config.ts`` 是裸的 ``yaml.load``，Vercel 构建也不跑 pytest。
+    repo_url: str = Field(pattern=r"^https://")
 
 
 class AppConfig(_Strict):

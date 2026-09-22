@@ -19,10 +19,20 @@ import { PoolTable, type Row } from "@/components/PoolTable";
 import { EmptyDatabase, StaleBanner, UnavailableNotice, failClosed } from "@/components/States";
 import { metrics as metricSpecs, universe } from "@/lib/config";
 import { poolColumns } from "@/lib/columns";
+import { STALE_AFTER_DAYS } from "@/lib/market";
 import { parseSort, sortRows } from "@/lib/sort";
 import type { MetricRow } from "@/lib/supabase";
 
 export const revalidate = false;
+
+/**
+ * 两组演示数字都是**照着真实日历算出来的**，不是随手填的：
+ * 2026-08-14（周五）→ 2026-09-22（周二）是 39 个日历日、其间 26 个 session
+ * （劳动节 09-07 休市）；2026-09-18（周五）→ 09-22 是 4 个日历日、2 个 session。
+ * 这样下一个人可以照着推，而不会以为这几个数是编的。
+ */
+const STALE_DEMO_DAYS = 39;
+const NORMAL_DEMO_DAYS = 4;
 
 /** 样例行。数字是编的，只为把渲染分支走到。 */
 function sample(over: Partial<MetricRow>): MetricRow {
@@ -161,10 +171,24 @@ export default async function States({
       </Block>
 
       <Block
-        title="② 数据陈旧（>1 个交易日未更新）"
-        note="dead-man 场景。黄条要说清楚落后了多少个交易日 —— 落后 2 天和落后 40 天是完全不同的两件事，而后者才是真正要说清楚的那次。"
+        title={`② 数据陈旧（落后 ≥ ${STALE_AFTER_DAYS} 个日历日）`}
+        note={`dead-man 场景。判据是日历日不是交易日 —— 管道收盘后一小时才写入，当天、周末、假日落后都是常态，按交易日判会天天亮一次黄条（理由见 lib/market.ts 的 STALE_AFTER_DAYS）。亮起来之后两个数都印：触发用的日历日，以及漏了几根 bar 的交易日数。`}
       >
-        <StaleBanner asOf="2026-08-14" sessionsBehind={27} />
+        <StaleBanner asOf="2026-08-14" sessionsBehind={26} daysBehind={STALE_DEMO_DAYS} />
+        {/* 正常落后（周五收盘、周二来看）——**故意放一个渲染为 null 的调用**。
+            演示页的价值在于把「该亮」和「不该亮」摆在一起；只放会亮的那个，
+            阈值哪天被改回 1 也不会有人在这一页上看出来。
+            它不占任何位置，所以下面那句话必须自己说清楚它在指什么 ——
+            不能写成「上面这片空白」，因为根本没有空白，紧挨着的是上面那条黄条。 */}
+        <StaleBanner asOf="2026-09-18" sessionsBehind={2} daysBehind={NORMAL_DEMO_DAYS} />
+        <p className="px-6 py-2 text-xs text-zinc-600">
+          （这一格里还有第二个 <code className="text-zinc-500">StaleBanner</code>，传的是
+          「落后 {NORMAL_DEMO_DAYS} 个日历日」—— 不到 {STALE_AFTER_DAYS} 天的阈值，
+          于是它渲染为 <code className="text-zinc-500">null</code>，在页面上不留任何痕迹。
+          那就是每天收盘后、以及整个周末的常态：
+          <strong className="text-zinc-400">什么都不显示</strong>，
+          由页首那行「数据截至 …」把事实说清楚。）
+        </p>
       </Block>
 
       <Block
