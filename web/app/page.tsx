@@ -7,11 +7,13 @@
  * **更可能先触顶**。
  */
 import { PoolTable, type Row } from "@/components/PoolTable";
+import { RepoLink } from "@/components/RepoLink";
 import { TopThree } from "@/components/TopThree";
 import { EmptyDatabase, StaleBanner, failClosed } from "@/components/States";
 import { app, metrics as metricSpecs, strength, universe } from "@/lib/config";
 import { poolColumns } from "@/lib/columns";
 import { parseSort, sortRows } from "@/lib/sort";
+import { MARKET_TZ_LABEL, daysBetween, todayISO } from "@/lib/market";
 import { rest, type MetricRow, type PriceRow, type StrengthRow, type SymbolRow } from "@/lib/supabase";
 
 /**
@@ -22,13 +24,14 @@ import { rest, type MetricRow, type PriceRow, type StrengthRow, type SymbolRow }
  * 三次都是 **200 + 故障前的价格 + 没有陈旧黄条**。Next 的 response cache 在条目
  * 过期且非 on-demand 时先把**旧页面**返给访客再去后台重生成，后台那次一抛就被
  * 吞成一行 `console.error`，旧条目留在缓存里继续发。**永远不会自愈** ——
- * `sessionsBehind` 是生成那一刻算出来的 `1`，于是黄条被 `<= 1` 永久藏起来，
+ * 陈旧判据是生成那一刻算出来的，于是黄条被永久藏起来，
  * 页面会一直宣称自己是最新的。
  *
  * 改成按请求渲染之后：
  *
  * - **陈旧天数每次重算**，不会被冻住。`sessions` 的查询 URL 里带着
- *   `todayISO()`，所以每跨一天缓存键就变，不可能永远命中旧答案。
+ *   当天日期，所以每跨一天缓存键就变，不可能永远命中旧答案；
+ *   日历日那一侧根本不经过缓存，每次渲染现算。
  * - 一份缓存都没有时（冷启动、部署后第一次访问）照样 `failClosed` → **500**。
  * - **出站流量仍然接近零**（§10.1）：每个 `fetch` 都带 `next: { revalidate }`，
  *   命中的是 **Data Cache**。实测一次构建打数据源 **0 次**，
@@ -51,10 +54,6 @@ export const dynamic = "force-dynamic";
 // 免得上游默认值一变，出站流量就从「接近零」变成「每次请求全量」。
 export const fetchCache = "default-cache";
 
-function daysBetween(a: string, b: string): number {
-  return Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000);
-}
-
 export default async function Dashboard({
   searchParams,
 }: {
@@ -64,6 +63,9 @@ export default async function Dashboard({
 }) {
   const R = app.revalidate_seconds;
   const params = await searchParams;
+  // 取一次就固定下来：查询与落后天数必须用**同一个**「今天」，
+  // 否则一次跨午夜的渲染会让两者差一天。
+  const today = todayISO();
 
   const symbols = await rest<SymbolRow>("symbols?select=symbol,name,type,enabled&enabled=eq.true&order=symbol", R);
   if (!symbols.ok) failClosed(symbols.reason, symbols.status);
@@ -85,7 +87,7 @@ export default async function Dashboard({
     // 编造的数字 —— 而「落后很多」恰恰是 dead-man 场景，
     // 是这条黄条唯一真正要说清楚的时刻。
     rest<{ date: string }>(
-      `trading_sessions?select=date&date=gt.${asOf}&date=lte.${todayISO()}&order=date.asc&limit=500`,
+      `trading_sessions?select=date&date=gt.${asOf}&date=lte.${today}&order=date.asc&limit=500`,
       R,
     ),
   ]);
@@ -153,24 +155,33 @@ export default async function Dashboard({
   const sort = parseSort(params, poolColumns(extraColumns));
   const rows = sortRows(unsorted, sort);
 
-  // 顶部黄条：>1 个交易日未更新（§10.6）。
+  // 顶部黄条（§10.6）。亮不亮只看 `daysBehind`，理由见 `lib/market.ts`
+  // 的 `STALE_AFTER_DAYS`。
   //
-  // `sessions` 里装的是 asOf **之后**的 session，所以「落后几个交易日」
-  // 就是它的行数 + 1（没有任何一行 = 数据就是最新的 = 1）。
-  // 这个算法对落后 1 天和落后 40 天同样准确 —— 而后者才是真正要说清楚的那次。
-  const behind = sessions.rows.length + 1;
+  // `sessions` 装的是 asOf 之后、今天（含）以内的 session，行数就是没有数据的
+  // 交易日数。**以前这里是 `+ 1`**，把「一行都没有 = 完全最新」记成 1，
+  // 整条刻度系统性高报一天；`invariants.sql` 的「管道不得静默停摆」数的
+  // 正是不带 `+1` 的同一个量，所以去掉之后页面与自动断言才在同一把尺子上。
+  //
+  // 仍有一处不精确：查询是 `date <= today`，所以交易日当天**收盘前**，
+  // 今天这根尚未收盘的 session 已经被算进去了，盘中会高报 1。
+  // 比原来「永远高报 1」好，但不是零误差。
+  const sessionsBehind = sessions.rows.length;
+  const daysBehind = daysBetween(asOf, today);
   const top3 = ranks.rows.filter((r) => r.in_top_n).slice(0, strength.top_n);
 
   return (
     <>
-      <StaleBanner asOf={asOf} sessionsBehind={behind} />
+      <StaleBanner asOf={asOf} sessionsBehind={sessionsBehind} daysBehind={daysBehind} />
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
         <header className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
             <h1 className="text-lg font-medium text-zinc-100">{app.site.title}</h1>
             <p className="text-xs text-zinc-500">{app.site.subtitle}</p>
           </div>
-          <p className="num text-xs text-zinc-500">数据截至 {asOf} 收盘</p>
+          <p className="num text-xs text-zinc-500">
+            数据截至 {asOf}（{MARKET_TZ_LABEL}）收盘
+          </p>
         </header>
 
         <section className="mt-6" aria-labelledby="pool">
@@ -197,26 +208,11 @@ export default async function Dashboard({
           <a href="/methodology" className="text-zinc-400 underline underline-offset-2">方法论与口径</a>
           <span className="mx-2 text-zinc-700">·</span>
           <a href="/states" className="text-zinc-400 underline underline-offset-2">非理想态演示</a>
+          <span className="mx-2 text-zinc-700">·</span>
+          <RepoLink />
           <p className="mt-2">{app.site.disclaimer}</p>
         </footer>
       </main>
     </>
   );
-}
-
-/**
- * **交易所当地日期，不是 UTC 日期。**
- *
- * 用 UTC 时，从 UTC 午夜到下一个美股 session 之间的那几个小时里，
- * 「今天」会提前跨到下一天，于是查询把一个**预填的未来 session** 也算进来，
- * 顶部黄条就会谎报「已落后 2 个交易日」—— 一条在每天固定时段自动出现、
- * 而数据其实完全正常的告警。
- */
-function todayISO(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
 }

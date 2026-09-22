@@ -97,7 +97,7 @@ export default function Methodology() {
       <h2 className="mt-8 text-base font-medium text-zinc-200">已知局限</h2>
       <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-400">
         <li>财报有盘前/盘后之分，而本站以「日」为粒度，不建模具体时刻。</li>
-        <li>事件距离用<strong className="text-zinc-300">日历日</strong>，其余所有窗口用<strong className="text-zinc-300">交易日</strong>。</li>
+        <li>事件距离与顶部陈旧黄条的触发阈值用<strong className="text-zinc-300">日历日</strong>，其余所有窗口用<strong className="text-zinc-300">交易日</strong> —— 黄条亮起后报的落后天数本身仍是交易日。</li>
         <li>「下一次」的事件日期在公司正式确认前是预告值，会移动；这类值加虚线标注。</li>
         <li>数据来自免费源，仅供研究；本站不构成任何投资建议。</li>
       </ul>

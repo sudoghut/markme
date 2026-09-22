@@ -30,7 +30,7 @@ export type MetricSpec = {
 };
 
 export type AppConfig = {
-  site: { title: string; subtitle: string; disclaimer: string };
+  site: { title: string; subtitle: string; disclaimer: string; repo_url: string };
   revalidate_seconds: number;
   sparkline_bars: number;
   lookback_bars: number;

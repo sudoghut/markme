@@ -1,4 +1,5 @@
 /** §10.6 的四种非理想态。**每一种都要真的实现**，不能掉进白屏。 */
+import { MARKET_TZ_LABEL, STALE_AFTER_DAYS } from "@/lib/market";
 
 export function EmptyDatabase() {
   return (
@@ -11,12 +12,35 @@ export function EmptyDatabase() {
   );
 }
 
-/** 数据陈旧（>1 交易日未更新）→ 顶部黄条。 */
-export function StaleBanner({ asOf, sessionsBehind }: { asOf: string; sessionsBehind: number }) {
-  if (sessionsBehind <= 1) return null;
+/**
+ * 数据陈旧 → 顶部黄条（§10.6）。判据是**日历日**，理由见
+ * `lib/market.ts` 的 `STALE_AFTER_DAYS`（一句话版：按交易日判会天天亮一次）。
+ *
+ * 没到阈值就什么都不渲染 —— 页首那行「数据截至 …」已经把事实说清楚了，
+ * 它不需要变成黄色。
+ *
+ * **两个数都印出来。** 触发用的是日历日，而人要拿去对账的是「漏了几根 bar」，
+ * 只印后者会让读者对着一条「满 7 个日历日才亮」的规则看见「已落后 5 个交易日」，
+ * 两把尺子对不上而屏幕上没有任何桥。交易日那半只在 > 0 时出现：
+ * `trading_sessions` 没预填到今天时它会是 0，而「已落后 0 个交易日」
+ * 配上「管道可能停了」是一句自相矛盾的话。
+ */
+export function StaleBanner({
+  asOf,
+  sessionsBehind,
+  daysBehind,
+}: {
+  asOf: string;
+  /** asOf 之后已进入日历、却没有数据的 session 数。只进文案，不参与判据。 */
+  sessionsBehind: number;
+  /** asOf 距今天（交易所当地日）的日历日数。判据只看它。 */
+  daysBehind: number;
+}) {
+  if (daysBehind < STALE_AFTER_DAYS) return null;
   return (
     <div className="border-b border-accent/30 bg-accent/10 px-6 py-2 text-xs text-accent">
-      数据截至 {asOf}，已落后 {sessionsBehind} 个交易日 —— 管道可能停了。
+      数据截至 {asOf}（{MARKET_TZ_LABEL}）收盘，已落后 {daysBehind} 个日历日
+      {sessionsBehind > 0 ? `（${sessionsBehind} 个交易日没有数据）` : ""} —— 管道可能停了。
       页面显示的是最后一次成功写入的结果。
     </div>
   );
