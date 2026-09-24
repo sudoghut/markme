@@ -1,6 +1,6 @@
 ---
 name: review-gate
-description: 跑 markme 的两道 review 闸门（并行 review agent + 外部 codex CLI），修到干净为止，并留下记录。任何一个小环节完成后、开 PR 与 rebase merge 之前使用。
+description: 跑 markme 的两道 review 闸门（并行 review agent + 外部 codex CLI），修到干净为止，并留下记录。任何一个小环节完成后、开 PR / rebase merge / 删分支之前使用。
 ---
 
 # 两道 review 闸门
