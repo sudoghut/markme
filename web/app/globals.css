@@ -11,8 +11,7 @@
    **绝不用 0 或上一日的值冒充**（§10.4 诚实优先于漂亮）。 */
 .provisional { opacity: .55; text-decoration: underline dotted currentColor; text-underline-offset: 3px; }
 
-/* 估计值（未确认的事件日）同样用虚线，语义一致。 */
-.estimated { text-decoration: underline dashed currentColor; text-underline-offset: 3px; }
+/* 估计值（未确认的事件日）**不加下划线**：几乎每枚标签都是预告值，标满等于没标（§3.5(2)）。 */
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }

@@ -40,7 +40,7 @@ const CURATED: PoolColumn[] = [
   { id: "rsi_14", label: "RSI(14)" },
   { id: "beta", label: "β" },
   { id: "alpha_annual", label: "α(年化)" },
-  { id: "next_event", label: "事件", sortNote: "按芯片上那个天数排序" },
+  { id: "next_event", label: "事件", sortNote: "按天数排序" },
 ];
 
 export type ExtraColumn = { id: string; label: string; format: string };

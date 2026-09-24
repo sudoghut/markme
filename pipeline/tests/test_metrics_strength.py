@@ -228,8 +228,8 @@ class TestEventDistanceTodayBoundary:
         """同一天两行时，结果不能取决于列表顺序。
 
         ``symbol_events`` 故意没有自然主键（§3.5(1)），而不带 ORDER BY 的
-        SELECT 没有顺序保证 —— 不显式打破并列的话，倒计时芯片上的「估计」
-        标记会在两次运行之间无缘无故地闪。约定：**同一天优先取已确认的那行**。
+        SELECT 没有顺序保证 —— 不显式打破并列的话，倒计时标签的「是预告还是
+        已确认」会在两次运行之间无缘无故地翻。约定：**同一天优先取已确认的那行**。
         """
         day = date(2027, 1, 28)
         est = Event(day, is_estimated=True)
