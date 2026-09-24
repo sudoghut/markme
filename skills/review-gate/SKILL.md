@@ -1,6 +1,6 @@
 ---
 name: review-gate
-description: 跑 markme 的两道 review 闸门（并行 review agent + 外部 codex CLI），修到干净为止，并留下记录。任何一个小环节完成后、进 git 流程之前使用。
+description: 跑 markme 的两道 review 闸门（并行 review agent + 外部 codex CLI），修到干净为止，并留下记录。任何一个小环节完成后、开 PR 与 rebase merge 之前使用。
 ---
 
 # 两道 review 闸门
@@ -208,4 +208,7 @@ powershell.exe -NoProfile -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $e
 **误报也要写，并写明理由** —— 否则下一轮会有人再报一遍同一条，
 而你已经想不起来当初为什么判它是误报。
 
-两道闸门都干净之后才进 git 流程（`AGENTS.md` 的「Git 工作流」一节）。
+两道闸门都干净之后才**开 PR、rebase merge、删分支**
+（`AGENTS.md` 的「Git 工作流」一节）。
+往**里程碑分支**上提交并推送发生得更早 —— 闸门 A 干净之后就做，
+否则闸门 B 没有一棵稳定的树可读。**闸门守的是 `main`，不是分支。**
