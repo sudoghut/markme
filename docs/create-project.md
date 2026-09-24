@@ -2253,7 +2253,7 @@ Hobby 免费版没有** —— 免费版只有 "Vercel Authentication"，那不�
 | **M1** | 配置层 | 4 个 YAML + pydantic schema | 非法 config 被明确报错；universe 17 个标的解析正确；**`min_bars ≤ provisional_below` 不变式生效**；§6.2 三条 CI 校验生效 | 0.5d |
 | **M2** | 指标引擎 | `pipeline/metrics/*` + 注册表 + 单元测试 | RSI/EMA 对齐手算 golden values（显式递归口径）；**QQQ 对自己 β=1、α=0、R²=1**；**`r2 == corr²`**；**合成拆股序列上 `close_vs_ema60_pct` 连续**；除零 / NaN / 样本不足 / 全 NaN 排名 均有测试；**事件距离的今天边界**（财报当天 `days_since=0` 且 `days_to` 指向下一季）有测试 | 1.5d |
 | **M3** | 数据库（六张表） | **前置（脚本，用管理 token）**：创建 `pipeline_writer` 角色 + 随机密码，**必须在 0001 之前**。**本里程碑交付**：`0001_init.sql`（REVOKE/GRANT、RLS 与策略、触发器、`v_strength_enriched` 完整 SQL，**不含 create role**）+ `0001_rollback.sql` + `invariants.sql` + §9.3.3 全部集成测试 | **在空库上执行**（M4 回填之前）；anon INSERT 得 `42501`（见 §8.4）；anon SELECT **六张公开表 + 视图**全部成功；§9.3.2 的不变式返回 0 行；回滚脚本实测可用 | **1.5d** |
-| **M4** | 抓取与写入 | `fetch.py`（整窗降级 + §7.2 闸门 4 的合理性断言）、**`sync_symbols.py`（config → `symbols`）**、**`sync_sessions.py`（XNAS 日历 → `trading_sessions`，带 ordinal）**、**`fetch_events.py`（财报/分红 → `symbol_events`，逐标的 17 次请求，按 §3.5(4) 的周频与 §7.3.1 的限流）**、`store.py`（T1/T2/T3 三事务 + NaN sanitizer）、`backfill.py` | 回补 400 根 bar 成功（约 126 个 NaN 前导行不炸）；重复跑 backfill 行数不变；复权因子变化能被检出；`close` 是否已拆股调整**实测确认一次**；**事件侧**：移动财报日不留孤儿行（§3.5(1) 不变式返回 0 行）、整窗 Stooq 降级跑通、`calendar['Ex-Dividend Date']` 究竟是下一次还是最近一次**实测确认一次** | **3.0d** |
+| **M4** | 抓取与写入 | `fetch.py`（整窗降级 + §7.2 闸门 4 的合理性断言）、**`sync_symbols.py`（config → `symbols`）**、**`sync_sessions.py`（XNAS 日历 → `trading_sessions`，带 ordinal）**、**`fetch_events.py`（财报/分红 → `symbol_events`，每标的 3 个端点、约 51 次请求，按 §3.5(4) 的周频与 §7.3.1 的限流）**、`store.py`（T1/T2/T3 三事务 + NaN sanitizer）、`backfill.py` | 回补 400 根 bar 成功（约 126 个 NaN 前导行不炸）；重复跑 backfill 行数不变；复权因子变化能被检出；`close` 是否已拆股调整**实测确认一次**；**事件侧**：移动财报日不留孤儿行（§3.5(1) 不变式返回 0 行）、整窗 Stooq 降级跑通、`calendar['Ex-Dividend Date']` 究竟是下一次还是最近一次**实测确认一次** | **3.0d** |
 | **M5** | 自动化 | `daily.yml` + 四重闸门 + 条件重试 + `concurrency` + `runs` 日志 + dead-man's switch | **冻结时钟的单元测试**覆盖 4 个 cron 时刻 × 2 个时区(EST/EDT) × 2 类交易日(全日/半日) = 16 种组合，逐一断言闸门判定；手动 dispatch 跑通 | 1.0d |
 | **M6** | 前端骨架 | Next.js + 服务端读取 + 构建期直读 YAML + **显式列与 `extra` 双路读取** + **最小错误边界** + 部署 Vercel | 线上能看到真实数据的裸表格；新增一个 extra 指标无需改前端代码；**数据库不可达时显示「数据暂不可用」+ 正确 HTTP 状态码，不是白屏** | 1.0d |
 | **M7** | 前端成品 | 全池表格+sparkline（主体，α/β 明细行内展开）、三强横条、α–β 散点、方法论页、**密码 middleware + /login**、双主题、**响应式：横滚 + 纵横表头冻结**（§10.4，不做卡片列表）、四种非理想态 | 移动端可用；Lighthouse ≥ 95；四种状态可手动触发演示；**403 白屏态必须真的实现**（§12 #9 第 4 条） | **2.0d** |
@@ -2333,7 +2333,7 @@ powershell.exe -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PRO
 | 10 | 榜单存多少名 | **已定**：全部 16 名（§4.4），前端只显示前 3 —— 但**榜单不是本项目的主题**，只是加在这批标的上的又一个变量（§4 开头、§10.2 布局已按此修正） | 约 4000 行/年；全池表格才是首页主体，三强降为一条紧凑横条 |
 | 11 | alpha 年化方式 | **已定**：线性（`alpha_d × 252`），`compound` 保留为可选 | 复利式会把强势半年的 α 夸大 2–4.5 倍，极端时还会撑爆列宽 |
 | 12 | 个股详情页 | **已定：不做**，只做单页仪表盘（§10.2） | M7 从 3.5d 降到 2.0d；数据都在库里，以后想加随时能加 |
-| 13 | 事件距离参数 | **已定：加**财报/分红的前后距离共 4 个（§3.5），单位为**日历日** | 新增 `symbol_events` 表（第六张公开表）；抓取**不可批量**（逐标的 17 次）故改为**周频**刷新；**事件列只写最新一行、历史行全为 NULL**（§3.5(3)），于是不存在前视泄露也不需要就此写免责声明 |
+| 13 | 事件距离参数 | **已定：加**财报/分红的前后距离共 4 个（§3.5），单位为**日历日** | 新增 `symbol_events` 表（第六张公开表）；抓取**不可批量**（每标的 3 次请求、约 51 次）故改为**周频**刷新；**事件列只写最新一行、历史行全为 NULL**（§3.5(3)），于是不存在前视泄露也不需要就此写免责声明 |
 | 14 | 仓库与凭证交付 | **已定**：设计定稿后在你的个人 GitHub 上新建 **public** 仓库；`sbp_` 管理 token 与 GitHub token 走 `.env`（已 gitignore），**不经聊天记录**，用完你删 | 注意：`sbp_` 只能操作 Supabase，建仓库需要另一个 GitHub token；本架构里**不存在**「把 repo 连到 Supabase」这一步 —— 连接就是 Secrets 里那条连接串 |
 
 ### §12 #5 的推导：`lookback_bars` 为什么是 400
