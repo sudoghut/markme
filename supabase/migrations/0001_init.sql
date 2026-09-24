@@ -64,7 +64,7 @@ create table symbol_events (
   event_type   text not null check (event_type in ('earnings','dividend')),
   event_date   date not null,
   -- 无 default：写入方必须显式表态（§3.5(2)）。把已发生的除息日标成「估计」
-  -- 是另一种不诚实，而且会让前端的虚线到处都是、从而失去意义。
+  -- 是另一种不诚实，而且会让前端的标记到处都是、从而失去意义。
   is_estimated boolean not null,
   -- 口径：Ticker.dividends 返回的是**拆股调整后**的每股金额，与公告原值
   -- 在有拆股的窗口里不一致（NVDA/AVGO 2024 均 10:1）。本项目只存前者。

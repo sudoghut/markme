@@ -132,7 +132,12 @@ export function Sparkline({ points, label }: { points: number[]; label: string }
   );
 }
 
-/** 事件倒计时芯片。估计值加**虚线下划线**（§3.5(2) / §10.4）。 */
+/**
+ * 事件倒计时标签。
+ *
+ * `estimated` 只进 `title`，**不进样式**：几乎每一枚标签都是预告值（下一次财报
+ * 在公司确认前一直是估计值），标满整列等于没标（§3.5(2)）。
+ */
 export function EventChip({
   days,
   kind,
@@ -146,7 +151,7 @@ export function EventChip({
   const soon = days <= 10;
   return (
     <span
-      className={`inline-block rounded px-1.5 py-0.5 text-xs ${soon ? "bg-accent/15 text-accent" : "bg-ink-800 text-zinc-400"} ${estimated ? "estimated" : ""}`}
+      className={`inline-block rounded px-1.5 py-0.5 text-xs ${soon ? "bg-accent/15 text-accent" : "bg-ink-800 text-zinc-400"}`}
       title={estimated ? "预告值，尚未由公司确认" : "已确认"}
     >
       {kind} {days}d

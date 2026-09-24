@@ -78,7 +78,7 @@ export default function Methodology() {
       <p className="mt-2 text-zinc-400">
         点表头可以按任一列排序。两列的排序键不是它字面上画的东西，写在这里：
         <strong className="text-zinc-300">60 日走势</strong>按那条线的首末涨跌排；
-        <strong className="text-zinc-300">事件</strong>按芯片上那个天数排，首次点击是最近的在前。
+        <strong className="text-zinc-300">事件</strong>按天数排，首次点击是最近的在前。
       </p>
       <p className="mt-2 text-zinc-400">
         <strong className="text-zinc-300">没有值的行永远沉到最下面，不随升降序翻转。</strong>
@@ -98,7 +98,7 @@ export default function Methodology() {
       <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-400">
         <li>财报有盘前/盘后之分，而本站以「日」为粒度，不建模具体时刻。</li>
         <li>事件距离与顶部陈旧黄条的触发阈值用<strong className="text-zinc-300">日历日</strong>，其余所有窗口用<strong className="text-zinc-300">交易日</strong> —— 黄条亮起后报的落后天数本身仍是交易日。</li>
-        <li>「下一次」的事件日期在公司正式确认前是预告值，会移动；这类值加虚线标注。</li>
+        <li>「下一次」的事件日期在公司正式确认前是预告值，会移动；标签上<strong className="text-zinc-300">不做视觉区分</strong> —— 桌面端悬停可看，触屏上看不到。</li>
         <li>数据来自免费源，仅供研究；本站不构成任何投资建议。</li>
       </ul>
 

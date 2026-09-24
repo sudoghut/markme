@@ -142,7 +142,7 @@ class TestThreeEndpoints:
 
     def test_historical_dividends_are_facts_not_estimates(self) -> None:
         """§3.5(2)：把 settled 的事实标成「估计」是另一种不诚实，
-        而且会让虚线到处都是、从而失去意义。"""
+        而且会让标记到处都是、从而失去意义。"""
         out = self._fetch()
         hist_div = [e for e in out.events if e.event_type == "dividend" and e.event_date < TODAY]
         assert hist_div and all(not e.is_estimated for e in hist_div)

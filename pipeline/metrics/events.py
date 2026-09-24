@@ -77,8 +77,9 @@ def _bracket(obs: date, events: list[Event]) -> tuple[Event | None, Event | None
     past = [e for e in events if e.event_date <= obs]
     # 同一天可能有两行（§3.5(1)：symbol_events 故意没有自然主键，
     # 而不带 ORDER BY 的 SELECT 没有顺序保证）。不显式打破并列的话，
-    # `min`/`max` 返回的是**列表里的第一个**，于是倒计时芯片上的「估计」标记
-    # 会在两次运行之间无缘无故地闪。
+    # `min`/`max` 返回的是**列表里的第一个**，于是倒计时标签的「是预告还是已确认」
+    # 会在两次运行之间无缘无故地翻。**受影响的只有这一个标记** —— 并列的前提就是
+    # 日期相等，所以天数与日期在两种顺序下恒等，排序键也从不读 is_estimated。
     # 排序键里把 is_estimated 写在后面：同一天时**优先取已确认的那行**。
     nxt = min(future, key=lambda e: (e.event_date, e.is_estimated)) if future else None
     last = max(past, key=lambda e: (e.event_date, not e.is_estimated)) if past else None
