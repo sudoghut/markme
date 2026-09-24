@@ -42,18 +42,67 @@ description: 跑 markme 的两道 review 闸门（并行 review agent + 外部 c
 独立性来自「它是另一个进程、另一个模型」，所以**不能**用内部 subagent 代替。
 
 ```powershell
-powershell.exe -NoProfile -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PROXY='http://127.0.0.1:7890'; Set-Location '<repo>'; Get-Content -Raw -Encoding UTF8 '<prompt.txt>' | codex exec --dangerously-bypass-approvals-and-sandbox"
+powershell.exe -NoProfile -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PROXY='http://127.0.0.1:7890'; Set-Location '<repo>'; Get-Content -Raw -Encoding UTF8 '<prompt-file>' | codex exec --sandbox read-only"
 ```
 
 四条都不能省：
 
-- **`--dangerously-bypass-approvals-and-sandbox`**：非交互 + 跳过沙盒审批。
-  在这台机器上这不是「偷懒」，是**唯一可行的模式** —— 实测 `--sandbox read-only`
-  会在启动沙盒辅助进程时失败（`ShellExecuteExW ... 1223`，即 ERROR_CANCELLED：
-  非交互环境下提权弹窗被自动取消），codex 连 `git status` 都跑不了，
-  最后回的是「无法完成审查」而不是 CLEAN。
-- **prompt 走文件，不要内联字符串**。review prompt 里几乎必然出现代码片段，
-  内联时一个撇号或 `$` 就让 PowerShell 崩掉（实测：`The string is missing the terminator`）。
+- **沙盒模式：先试 `--sandbox read-only`，不行再试
+  `--dangerously-bypass-approvals-and-sandbox`。** 哪个能用**不是固定的**，
+  取决于当时跑 codex 的那个执行环境，所以两条实测都留在这里：
+
+  **不要把下面这张表读成时间线。** `--sandbox read-only` 在**同一天**
+  （2026-09-21）既失败过也成功过：闸门 B 第 11 轮起不来沙盒，
+  而同日 `ui-column-sort` 那轮它跑出了一次 CLEAN。所以判据是**失败指纹**，
+  不是日期，更不是「哪个版本已经修好了」：
+
+  | 模式 | 失败长什么样 | 成功过吗 |
+  |---|---|---|
+  | `--sandbox read-only` | 起不来沙盒辅助进程：`ShellExecuteExW ... 1223`（ERROR_CANCELLED，非交互环境下提权弹窗被自动取消），连 `git status` 都跑不了 | 跑通过多次（2026-09-21 的 `ui-column-sort`、2026-09-24 的 M10） |
+  | `--dangerously-bypass-approvals-and-sandbox` | 命令**根本没启动**，被上游的权限分类器在执行前拦下：见过 `[Security Weaken]`（2026-09-21）与 `Create Unsafe Agents`（2026-09-24） | **从 agent 这一侧 0/2**。唯一跑成的那次是用户在自己终端里发起的 |
+
+  两种失败都发生在「跑起来之前」，所以都指向换一条路；而**跑完了但结论离谱**
+  是另一回事，那要改 prompt（见「跑之前」与「读它的回答时」两节）。
+  既然 dangerous 从 agent 这一侧 0/2、拦点又在命令执行前的分类器上，
+  read-only 起不来时**试它一次就够了，别反复重试**，直接走第三条路。
+
+  **两个都起不来时，第三条路是请用户在他自己的终端里发起这条命令。**
+  2026-09-21 那轮就是这么跑起来的 —— 权限分类器拦的是 *agent 发起* 的调用，
+  不是命令本身。这条路是实测管用的，别忘了它。
+  但要连风险一起说给用户：那一次走的是
+  `--dangerously-bypass-approvals-and-sandbox`，**它有写权限也有 `gh` 权限**，
+  那一跑里 codex 自己把 PR #8 rebase 合进了 `main`（见 `docs/reviews/M4-M8.md`）。
+  所以这条路要么配只读 flag，要么在 prompt 里写死「不要修改任何文件、
+  不要提交、不要碰 PR」，并在跑完后 `git status` / `git log` 逐条看。
+  **在此之前不要把闸门 B 记成通过**：`AGENTS.md` 说没过不往前走，
+  而「跑不起来」和「跑过了没问题」是两件事
+  —— 记成「闸门 B 未覆盖」并交给用户决定，不要自己降级。
+
+  **只读模式下哪些命令它跑得了？分界不是「写不写盘」，
+  是「写不了的时候它降级继续，还是直接退出」。**
+  几乎所有工具都写缓存（`.ruff_cache/` / `.mypy_cache/` / `.pytest_cache/`
+  在本仓库的 `.gitignore` 里并排列着），所以「要不要写盘」筛不出东西。
+
+  | | 命令 | 依据 |
+  |---|---|---|
+  | **实测跑得了** | `git` 的只读子命令、`ruff check .`、`ruff format --check .` | 2026-09-24 那跑 codex 自己跑过这三样（M10） |
+  | **实测跑不了** | 经 `uv` 启动的一切（本仓库 CI 里 mypy / pytest / 连 ruff 都是 `uv run`）、`next build` | `uv` 写不了自己的 cache 就**直接退出**：`Access is denied (os error 5)`；`next build` 见 M4-M8「它在只读沙盒里跑不动 `next build` 与 Playwright」 |
+  | **没验过，别当实测** | `npm ci`、`npx tsc --noEmit` | 它们都要写盘，但**「写盘」本身不足以断定跑不了**（ruff 也写 `.ruff_cache/`）。要用之前自己试一次，试完把结果补进 `docs/reviews/M<N>.md` |
+
+  所以 **mypy / pytest / `next build` 得你自己跑**；`npm ci` / `npx tsc` 未知。
+  遇到没试过的命令，问的不是「它写不写盘」，是「写不了时它会不会死」。
+  （`ruff` 为什么跑得成？最可能是写不了缓存时降级继续 ——
+  **这是反推，实测到的只有「它跑成了」**，别把机制写成观察。）
+  记录里要写清这条分界，两个方向都会错：把没验过的说成验过了，
+  和把它真验过的说成没验过。
+- **prompt 走文件，再用管道喂进去**。两件事，各防一个坑：
+  *走文件* —— review prompt 里几乎必然出现代码片段，内联时一个撇号或 `$`
+  就让 PowerShell 崩掉（实测：`The string is missing the terminator`）。
+  *用管道* —— `codex exec` 不从参数读 prompt，**不喂 stdin 它就一直等**，
+  不报错也不退出，一路挂到工具超时。「坏掉时没有症状」的又一例。
+  **prompt 文件放仓库外的临时目录，或者就叫 `.review-prompt.txt`**
+  （它已经在 `.gitignore` 里）。别的名字会被下面「跑之前」那条
+  「先提交并推送」一起带进 commit，推进公开仓库。
 - **显式设 `HTTPS_PROXY` / `HTTP_PROXY`**：Node.js 不读 Windows 注册表的代理设置。
 - **`powershell.exe`（带 `.exe`）**：裸 `powershell` 在这台机器上可能解析不到。
 
@@ -62,16 +111,49 @@ powershell.exe -NoProfile -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $e
 - **先把工作区提交并推送。** codex 读的是磁盘上的状态；对着一棵未提交的
   工作区跑，它的结论盖不住你之后的改动，而记录里会写成「这一轮过了」。
 - prompt 里写明 **`HEAD = <sha>`**，让结论可追溯到一个具体的树。
+- **先自己把质量命令跑一遍，再把结果写进 prompt**，并明确要求它
+  「**跑不了就明说跑不了，不要把『没跑』写成『通过』**」。
+  这不是客套：只读模式下它跑不了 `uv` 那一路（见上），而下面判断
+  「这一跑算不算数」的两条依据之一就是**它有没有如实说哪些命令没跑成** ——
+  prompt 里不要求，就没有这个信号。
+- **prompt 里不要描述它在流程里的位置。** 不要写「你是闸门 B」「这是第 2 跑」
+  「闸门 A 已经跑完了」这类话 —— 实测两次都翻车：一次它自称
+  「闸门 A 的安全组已回报 CLEAN，随后我会运行独立的闸门 B」；
+  另一次更彻底，它**把自己当成调度者**，去 PATH 里找一个 `codex` 可执行文件
+  来「跑闸门 B」，找不到，于是回「因此不能判为 CLEAN」——
+  整跑零实质审查，而那句话读起来像一个严谨的结论。
+  开头只写「**你就是审查者本人，不要委派、不要启动任何其他工具或 agent**」，
+  外加要审的 diff 和检查项。**它在流程里的位置是你的事，不是它的事。**
+  **检查项里同样不能出现**「闸门 / 第几跑 / codex」，**包括间接引用** ——
+  写一句「核对 `docs/reviews/M<N>.md` 的闸门 B 一节」就够了：M10 第 2 跑
+  开头已经洗干净，就是被这样一条检查项漏进去的，结果它审完之后补了一句
+  「按流程还不应合并，必须再跑一轮闸门 B」。要它核对某份记录，
+  就把**需要核对的事实**抄进 prompt，别让它顺着指针走回流程叙事里。
+- **闸门 A 那五条（只报 SERIOUS 的定义 / `文件:行号` + 失败场景 /
+  没有就明确说没有 / 已知且有意为之不要报的清单 / 不要修改任何文件）
+  同样适用于闸门 B**，一条都不能少。少了「已知有意为之」那张清单，
+  它会把早已确认过的取舍当成新发现报回来；少了「没有就明确说没有」，
+  它会凑数。给闸门 B 的 prompt 还要多一句：**不要提交、不要碰 PR**。
 
 ### 读它的回答时
 
-- **它有写权限，也有 `gh` 权限。** 那个 flag 的真实含义是它可以改文件、
-  提交、甚至合并 PR。跑完之后**必须 `git status` / `git log` 看一遍它做了什么**，
+- **`--dangerously-bypass-approvals-and-sandbox` 那一路，它有写权限也有 `gh` 权限。**
+  那个 flag 的真实含义是它可以改文件、提交、甚至合并 PR。
+  `--sandbox read-only` 那一路它改不了文件，但**两路跑完都要
+  `git status` / `git log` 看一遍**（沙盒有没有真的生效，你并没有验过），
   逐条决定保留还是回退 —— 不要把它的改动混进自己的 commit 里。
+  （prompt 里要写死这三条禁令，见上面「跑之前」。）
 - **「CLEAN」要看它是不是真的跑完了。** 实测出现过：它已经把
   「CLEAN」写进 review 记录，而输出最后一句是「独立审查仍在运行」。
   一份没跑完的审查写下的 CLEAN，正是这类项目最该防的东西 ——
   **坏掉时的症状是「一切正常」**。
+  反过来的形态也出现过：它逐条审完并报了「没有 SERIOUS」，却在结尾加一句
+  「但按流程现在还不应合并，必须再跑一轮闸门 B」—— 它不知道自己就是那一跑。
+  **那是流程误解，不是发现**，别把它当成一条待办。
+  **判断依据是两条，缺一条就不算数**：①它有没有对你列的每一项给出结论；
+  ②**它有没有如实说哪些命令它没跑成**。这两条是独立信号 —— M10 第 2 跑
+  逐条给了结论（①成立），结尾却加了一句流程误解；正因为②也成立
+  （它如实说了跑不了 `uv` 那一路），那一跑才算数。
 
 ---
 

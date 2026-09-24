@@ -2284,20 +2284,17 @@ Hobby 免费版没有** —— 免费版只有 "Vercel Authentication"，那不�
 - 修完再跑一轮，直到**没有 serious issues**。
 
 **闸门 B — codex CLI review**
-闸门 A 干净之后，调用外部 codex（终端命令，不是内部 subagent，独立性来自这里）做复核。
-要点（三条都不能省）：
-1. `codex exec --dangerously-bypass-approvals-and-sandbox` — 非交互模式 + 跳过沙盒审批。
-2. 用管道喂 prompt，否则 `codex exec` 会一直等 stdin。
-3. 先设 `$env:HTTPS_PROXY` / `$env:HTTP_PROXY` 为 `http://127.0.0.1:7890` ——
-   Node.js 不读 Windows 注册表的代理设置，必须显式设环境变量。
+闸门 A 干净之后，调用外部 codex 做复核。它是**另一个进程、另一个模型**，
+独立性全部来自这一点 —— 不能用内部 subagent 代替。
+同样：修完所有 serious issues，重跑到干净为止。
 
-**prompt 走文件，不要内联字符串。**
-`Write-Output '<prompt>' | ...` 在 prompt 含撇号或 `$` 时会直接崩，
-而 review prompt 里出现代码片段几乎是必然的：
-```powershell
-powershell.exe -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PROXY='http://127.0.0.1:7890'; Get-Content -Raw .\.review-prompt.txt | codex exec --dangerously-bypass-approvals-and-sandbox"
-```
-- 同样：修完所有 serious issues，重跑到干净为止。
+**具体怎么跑写在 [`skills/review-gate/SKILL.md`](../skills/review-gate/SKILL.md)，
+本文件不留第二份。** 那边记着沙盒模式该先试哪个、两个都被拦时的第三条路、
+prompt 为什么必须走文件再用管道喂、代理为什么要显式设、以及 prompt 里
+**不能**写它在流程里的位置。这些都是实测出来的、会随执行环境变的东西，
+抄两份必然漂移 —— 本节此前那份就已经过期了（它把
+`--dangerously-bypass-approvals-and-sandbox` 写成唯一模式，
+而从 agent 这一侧它两次都被权限分类器拦下）。
 
 **闸门通过的记录**：每个里程碑在 `docs/reviews/M<N>.md` 留一份
 「发现 → 处置（已修 / 记入 backlog / 判定为误报及理由）」的小结，
@@ -2312,8 +2309,15 @@ powershell.exe -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PRO
   > **这是你的流程，我不替你改** —— 当前按你的要求对每个环节都执行；
   > 想减负的话告诉我，我改 `AGENTS.md`。
 - `--dangerously-bypass-approvals-and-sandbox` 是在一台存有 OneDrive / Dropbox
-  的机器上运行一个无沙盒的 agent。这是一个被明确接受的风险，写在这里以便它是**被选择的**
-  而不是被默认的。
+  的机器上运行一个无沙盒的 agent。这是一个被明确接受的风险，写在这里以便它是
+  **被选择的**而不是被默认的。**2026-09-24 起默认改走 `--sandbox read-only`**
+  （见 M10），但这条风险**没有退役**：它恰好挂在两个模式都起不来时的兜底路径上
+  —— 那条路唯一的实测先例就是 dangerous 模式，而那一跑里 codex
+  自己把一个 PR rebase 合进了 `main`。
+  只读那一路换来的代价也要说清：经 `uv` 启动的命令与前端构建它跑不了，
+  于是 mypy / pytest / `next build` 得自己跑，**复核面小了一块**
+  （精确分界见 skill —— 不是「写不写盘」，ruff 也写缓存却跑得成）。
+  两者换的是不同的东西，别把模式切换当成纯粹的收紧。
 
 ---
 

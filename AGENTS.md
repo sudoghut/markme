@@ -36,16 +36,14 @@
    并行审查（正确性 / 安全与配置 / 简化与一致性）。修完所有 **serious issues**，
    重跑到干净为止；nice-to-have 记进 `BACKLOG.md`，不阻塞。
 2. **闸门 B — codex CLI**（外部终端命令，不是内部 subagent，保证独立性）：
+   它是**另一个进程、另一个模型**，独立性全部来自这一点，所以不能用内部
+   subagent 代替。同样修完所有 serious issues，**重跑到干净为止**。
 
-   ```powershell
-   powershell.exe -Command "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PROXY='http://127.0.0.1:7890'; Write-Output '<prompt>' | codex exec --dangerously-bypass-approvals-and-sandbox"
-   ```
-
-   - `codex exec --dangerously-bypass-approvals-and-sandbox`：非交互 + 跳过沙盒审批。
-   - `Write-Output "..." |`：用管道喂 prompt，否则 `codex exec` 会一直等 stdin。
-   - 必须显式设 `HTTPS_PROXY` / `HTTP_PROXY`：Node.js 不读 Windows 注册表的代理设置。
-   - 用 `powershell.exe`（带 `.exe`），裸 `powershell` 在这台机器上可能解析不到。
-   - 同样修完所有 serious issues，重跑到干净为止。
+   **具体怎么跑写在 [`skills/review-gate/SKILL.md`](skills/review-gate/SKILL.md)，
+   这里不留第二份。** 那边记着沙盒模式该先试哪个、prompt 为什么必须走文件
+   而不是内联、代理为什么要显式设、以及 prompt 里**不能**写它在流程里的位置。
+   这些都是实测出来的、会随环境变的东西，抄两份必然漂移
+   —— 本文件此前那份就已经和 skill 说的相反了。
 
 每个里程碑在 `docs/reviews/M<N>.md` 留一份「发现 → 处置（已修 / 记入 backlog /
 判定为误报及理由）」的小结。
