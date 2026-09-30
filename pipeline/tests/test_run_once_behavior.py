@@ -163,7 +163,7 @@ class TestRepairNeverUsesTodaysUnsettledBar:
         # 抓取返回空帧 → 在 T2 之前就 return，但 session_date 已经定下来了。
         monkeypatch.setattr(rd, "fetch_window", lambda *a, **k: FetchOutcome(frame=pd.DataFrame()))
 
-        # 敲钟那一刻：今天收盘 16:00，settle 60 分钟 → 今天还没定稿。
+        # 敲钟那一刻：今天收盘 16:00，settle 330 分钟 → 今天还没定稿。
         now = datetime.combine(today, time(16, 0), tzinfo=ET)
         report = rd.run_once(FakeConn(), cfg, now=now)
 
@@ -191,7 +191,7 @@ class TestStaleVendorOnlyAlertsWhenTheDayIsOut:
     「全员落后」——若照旧 exit 1，`daily` 每个交易日都要红好几次，
     于是 09-29 那天真正的故障淹在噪音里没人看见。
 
-    判据是 ``vendor_deadline_et``（23:00 ET）：之前只记录，之后才告警。
+    判据是 ``vendor_deadline_et``（22:30 ET）：之前只记录，之后才告警。
     那个数**必须 <= 每种情形下「最晚那一跑」的落点**，否则最后一跑也被宽限，
     就成了静默丢数据 —— 见 `test_schedule_dst.py` 里绑住它的那条。
     """
@@ -216,7 +216,7 @@ class TestStaleVendorOnlyAlertsWhenTheDayIsOut:
         return rd.run_once(FakeConn(), cfg, now=datetime.combine(today, at, tzinfo=ET))
 
     def test_before_the_deadline_it_records_but_does_not_alert(self, harness: Any) -> None:
-        report = self._lagging_run(harness, time(22, 0))
+        report = self._lagging_run(harness, time(22, 0))  # 早于截止
         assert report.status == "stale_vendor", "状态照记 —— runs 里的历史必须诚实"
         assert report.vendor_retry_pending is True
         assert report.exit_code == 0, "当天还有后续跑，这不是故障"
@@ -230,8 +230,54 @@ class TestStaleVendorOnlyAlertsWhenTheDayIsOut:
         assert "没有补救机会" in report.message
 
     def test_the_deadline_itself_alerts(self, harness: Any) -> None:
-        """**边界归告警那一侧。** 23:00 整那一跑是当天最后的机会，不该被宽限。"""
-        assert self._lagging_run(harness, time(23, 0)).exit_code == 1
+        """**边界归告警那一侧。** 截止时刻那一跑是当天最后的机会，不该被宽限。"""
+        assert self._lagging_run(harness, time(22, 30)).exit_code == 1
+
+
+class TestOnlyTheBenchmarkLaggingAlsoGetsTheGrace:
+    """**结算不是 17 只同时翻的。**
+
+    `fetch.py` 丢掉 `adj_close` 为 NaN 的半根 bar，于是「16 只已结算、
+    基准 QQQ 还没有」是结算过程中最正常的中间态 —— 它走的是
+    `if lagging:` 里 `bench in lagging` 那一支，和「全员落后」不是同一段代码。
+
+    第一版只给「全员落后」那一支装了宽限，而 §7.2 的表里写的恰恰是
+    「**基准** bar 落后（当天还有后续跑）→ exit 0」。表和实现对不上，
+    M12 要消灭的噪音会从这一支原样漏回来。
+    """
+
+    @staticmethod
+    def _bench_lagging_run(harness: Any, at: time) -> Any:
+        _, monkeypatch, rd = harness
+        cfg = load_config()
+        bench = cfg.universe.benchmark
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
+        days = [s.date for s in sessions]
+        others = [s for s in symbols if s != bench]
+        # 只有基准停在 D-1，其余都拿到了今天。
+        frame = pd.concat([_frame(others, days), _frame([bench], days[:-1])], ignore_index=True)
+        _install_plan(rd, monkeypatch, sessions, _no_revision())
+        monkeypatch.setattr(
+            rd,
+            "fetch_window",
+            lambda *a, **k: FetchOutcome(
+                frame=frame, per_symbol_source=dict.fromkeys(symbols, "yfinance")
+            ),
+        )
+        return rd.run_once(FakeConn(), cfg, now=datetime.combine(today, at, tzinfo=ET))
+
+    def test_before_the_deadline_it_does_not_alert(self, harness: Any) -> None:
+        report = self._bench_lagging_run(harness, time(22, 0))
+        assert report.status == "stale_vendor", "基准落后仍然是 stale_vendor"
+        assert report.exit_code == 0, "当天还有后续跑，这是结算中的正常中间态"
+        assert "当天仍有后续跑" in report.message
+
+    def test_after_the_deadline_it_alerts(self, harness: Any) -> None:
+        report = self._bench_lagging_run(harness, time(23, 30))
+        assert report.status == "stale_vendor"
+        assert report.exit_code == 1, "当天已无补救机会，基准还缺就必须有人看见"
 
 
 class TestEveryoneLaggingWritesNothing:

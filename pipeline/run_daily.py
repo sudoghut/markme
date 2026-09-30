@@ -12,8 +12,8 @@
 未到收盘 + settle_minutes     ``skipped_too_early`` 0          否
 本日已有 ok（条件重试跳过）    ``skipped_already_done`` 0       否
 仅事件抓取失败（§3.5(4)）     ``ok_events_stale``   **0**      **否**
-基准 bar 落后（当天还有后续跑）``stale_vendor``      **0**      **否**
-基准 bar 落后（当天最后一跑） ``stale_vendor``      1          是
+基准 bar 落后（早于 ``vendor_deadline_et``）``stale_vendor``  **0**  **否**
+基准 bar 落后（已到 ``vendor_deadline_et``）``stale_vendor``  1      是
 部分标的落后 / 脏数据 / 降级   ``partial``           1          是
 计算 / 写库异常               ``failed``            1          是
 ===========================  ====================  =========  ========
@@ -345,6 +345,14 @@ def revalidate_site(report: RunReport) -> None:
         report.note(f"重验证返回 {status}（不是 200）—— {hint}")
 
 
+def _grace_note(cfg: Config, grace: bool) -> str:
+    """`stale_vendor` 消息里那半句：这一跑到底算不算告警，写给看日志的人。"""
+    d = cfg.app.vendor_deadline_et
+    if grace:
+        return f"；还没到 {d:%H:%M} ET，当天仍有后续跑，不告警"
+    return f"；已过 {d:%H:%M} ET，当天没有补救机会了"
+
+
 def _structural_blanks(sessions: Sequence[Session], start: date, cfg: Config) -> set[date] | None:
     """窗口最左端那些「按定义排不出横截面」的日子。
 
@@ -427,6 +435,12 @@ def run_once(
         )
     elif revision.added_future:
         report.note(revision.describe())
+
+    # 「供应商还没出数」与「供应商坏了」在闸门看来现象一模一样，
+    # 区分它们的是**当天还有没有补救机会**（§7.2）。判据是**时刻**不是跑次序号 ——
+    # 后者要把 cron 抄进管道，而 cron 会变，抄两份必然漂移。
+    # 两处 `stale_vendor` 共用这一个值：只装一处的话，另一处会把噪音原样漏回来。
+    vendor_grace = now.astimezone(ET).time() < cfg.app.vendor_deadline_et
 
     # 2. 闸门 1 + 2
     gate = when_to_run(sessions, now, cfg.app.settle_minutes)
@@ -581,26 +595,27 @@ def run_once(
         #
         # 判据从 `prices.empty` 换成「是不是全员落后」—— 那才是这一半的本名。
         report.escalate("stale_vendor")
-        # 当天还有后续跑时不告警 —— 判据是**时刻**不是跑次序号：
-        # 后者要把 cron 抄进管道，而 cron 会变，抄两份必然漂移。
-        deadline = cfg.app.vendor_deadline_et
-        report.vendor_retry_pending = now.astimezone(ET).time() < deadline
+        report.vendor_retry_pending = vendor_grace
         report.note(
             f"全部 {len(symbols)} 只标的的最新 bar 都落后于 {session.date}，"
-            "跳过写入（不动已有数据）"
-            + (
-                f"；还没到 {deadline:%H:%M} ET，当天仍有后续跑，不告警"
-                if report.vendor_retry_pending
-                else f"；已过 {deadline:%H:%M} ET，当天没有补救机会了"
-            )
+            "跳过写入（不动已有数据）" + _grace_note(cfg, vendor_grace)
         )
         conn.rollback()
         return report
     if lagging:
         bench = cfg.universe.benchmark
-        # 已经是 partial 的话不要被覆盖回去（两者都 exit 1，但消息要留全）。
+        # 已经是 partial 的话不要被覆盖回去（消息要留全）。
         report.escalate("stale_vendor" if bench in lagging else "partial")
-        report.note(f"bar 落后：{', '.join(lagging)}")
+        if bench in lagging:
+            # **这一支同样要宽限。** 结算不是 17 只同时翻的：
+            # `fetch.py` 丢掉 `adj_close` 为 NaN 的半根 bar，于是「14 只已结算、
+            # 基准还没有」是结算过程中最正常的中间态。不装宽限的话，
+            # M12 要消灭的那种每天都响的噪音会从这一支原样漏回来。
+            report.vendor_retry_pending = vendor_grace
+        report.note(
+            f"bar 落后：{', '.join(lagging)}"
+            + (_grace_note(cfg, vendor_grace) if bench in lagging else "")
+        )
         # **只是尾部缺了一根，不是整窗都不可信 —— 所以这里什么都不丢。**
         #
         # 曾经这里是 `prices = prices[~prices["symbol"].isin(lagging)]`，
