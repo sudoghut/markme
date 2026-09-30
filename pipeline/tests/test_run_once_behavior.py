@@ -280,6 +280,64 @@ class TestOnlyTheBenchmarkLaggingAlsoGetsTheGrace:
         assert report.exit_code == 1, "当天已无补救机会，基准还缺就必须有人看见"
 
 
+class TestAGracedStaleVendorDoesNotSilenceRealProblems:
+    """**这是整条 M12 最贵的一个交互，而它一度只被一条 dataclass 单测钉住。**
+
+    `stale_vendor` 现在可以 exit 0（在等供应商结算，是良性的）。而「基准落后」
+    那一支**不 return、会继续往下走**。于是只要它先把状态锁成 `stale_vendor`，
+    下游每一个 `escalate("partial")` —— 窗口内有空洞 / 事件预算耗尽 /
+    非预热区算不出横截面 / 重验证失败 —— 就都被吞掉，
+    **而那一跑照样写库、照样把结果推上线**。
+
+    修法是让 `partial` 在 rank 上压过 `stale_vendor`。这条测试守的是
+    **端到端的那个行为**，不是 rank 表本身：把 rank 改回去，
+    `run_once` 这一层原本一条都不红。
+    """
+
+    @staticmethod
+    def _bench_lagging_with_a_gap(harness: Any) -> Any:
+        _, monkeypatch, rd = harness
+        cfg = load_config()
+        bench = cfg.universe.benchmark
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
+        days = [s.date for s in sessions]
+        others = [s for s in symbols if s != bench]
+        frame = pd.concat([_frame(others, days), _frame([bench], days[:-1])], ignore_index=True)
+        _install_plan(rd, monkeypatch, sessions, _no_revision())
+        monkeypatch.setattr(
+            rd,
+            "fetch_window",
+            lambda *a, **k: FetchOutcome(
+                frame=frame, per_symbol_source=dict.fromkeys(symbols, "yfinance")
+            ),
+        )
+        # 窗口内有空洞 —— 它自己的 docstring 说，一个内部空洞会完整地过掉闸门，
+        # 而后果是安静的。这里让它响一次，看还听不听得见。
+        monkeypatch.setattr(rd, "interior_gaps", lambda bars, window: {others[0]: 1})
+        return rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
+
+    def test_an_interior_gap_still_alerts_even_while_the_vendor_is_graced(
+        self, harness: Any
+    ) -> None:
+        report = self._bench_lagging_with_a_gap(harness)
+        assert report.status == "partial", "空洞不是良性的，它必须盖掉宽限"
+        assert report.exit_code == 1, "宽限只对「在等供应商」成立"
+        assert "窗口内有空洞" in report.message
+
+    def test_it_still_writes_the_data(self, harness: Any) -> None:
+        """**修复不能做成「不写了」。** 这一支本来就该写 —— 只是尾部缺一根。"""
+        calls, _, _ = self._harness_calls(harness)
+        assert calls, "这一跑仍然要写库"
+
+    @staticmethod
+    def _harness_calls(harness: Any) -> tuple[list[Any], Any, Any]:
+        calls, monkeypatch, rd = harness
+        TestAGracedStaleVendorDoesNotSilenceRealProblems._bench_lagging_with_a_gap(harness)
+        return calls["replace_strength"], monkeypatch, rd
+
+
 class TestEveryoneLaggingWritesNothing:
     """**全员落后**时一个字都不能写。
 
