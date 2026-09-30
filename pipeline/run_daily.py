@@ -73,6 +73,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅类型
     import psycopg
 
     from pipeline.config import Config
+    from pipeline.sessions import Session
     from pipeline.store import RunStatus
 
 __all__ = ["RunReport", "main", "revalidate_site", "run_once"]
@@ -328,6 +329,33 @@ def revalidate_site(report: RunReport) -> None:
             403: "Vercel 的 Deployment Protection",
         }.get(status, "检查 SITE_URL 指向的部署是否开着 Deployment Protection")
         report.note(f"重验证返回 {status}（不是 200）—— {hint}")
+
+
+def _structural_blanks(sessions: Sequence[Session], start: date, cfg: Config) -> set[date] | None:
+    """窗口最左端那些「按定义排不出横截面」的日子。
+
+    排序分有 §3.3 的硬闸门：``min_bars`` 之前的行一律 NULL，不出值。
+    于是本窗口最早的 ``min_bars - 1`` 个交易日上，池内**每一只**的排序分都是
+    NULL，``compute_strength`` 只能返回空表 —— 这不是失败，是定义。
+    它每一跑都存在，而且随窗口右移每天换一批日期。
+
+    **为什么要把它和真正的失败分开**：无差别 ``escalate("partial")`` 会让
+    ``daily`` 每天都红（实测 2026-09-24 起连续多日，每跑都带着
+    「20 天算不出横截面」）。而 ``invariants.sql`` 里写了三遍的那条原则是
+    「长期飘红的断言会把整套补偿策略训练成『反正它总是红的』」——
+    一个永远在响的告警，和没有告警是同一件东西。2026-09-29 那天
+    `stale_vendor` 真的响了，却淹在这片噪音里没人看见。
+
+    返回 ``None`` = **说不准**（排序分不是 metrics.yaml 里的指标，例如
+    ``composite``；或它没声明 ``min_bars``）。此时不认领任何一天是结构性的，
+    调用方照旧全部升级 —— 宁可多告警，不可少告警。
+    """
+    spec = cfg.metrics.by_id(cfg.strength.score_metric)
+    if spec is None or spec.min_bars is None:
+        return None
+    # 窗口短于闸门时，切片自然给出「全都是」—— 不需要另开一个分支。
+    window = [s.date for s in sessions if s.date >= start]
+    return set(window[: spec.min_bars - 1])
 
 
 def _null_rows(symbols: Sequence[str], day: date, cfg: Config) -> list[dict[str, Any]]:
@@ -690,10 +718,22 @@ def run_once(
                 continue
             replace_strength(conn, day, rows)
         if blanked:
-            report.escalate("partial")
-            report.note(
-                f"{len(blanked)} 天算不出横截面，已跳过而非清空：{blanked[0]}…{blanked[-1]}"
-            )
+            # **只有意外的那部分才该告警。** 窗口最左端那一段是定义使然，
+            # 见 `_structural_blank_until`。
+            warm = _structural_blanks(sessions, start, cfg)
+            structural = [d for d in blanked if warm is not None and d in warm]
+            unexpected = [d for d in blanked if warm is None or d not in warm]
+            if structural:
+                report.note(
+                    f"窗口最左端 {len(structural)} 天按定义排不出横截面"
+                    f"（排序分 {cfg.strength.score_metric} 的 min_bars 闸门），已跳过"
+                )
+            if unexpected:
+                report.escalate("partial")
+                report.note(
+                    f"{len(unexpected)} 天算不出横截面，已跳过而非清空："
+                    f"{unexpected[0]}…{unexpected[-1]}"
+                )
 
     report.note(
         f"价格 {report.rows_prices} 行（{d.unchanged} 行未变）、指标 {report.rows_metrics} 行"

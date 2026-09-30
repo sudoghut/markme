@@ -140,7 +140,7 @@ def _install_plan(
 class TestRepairNeverUsesTodaysUnsettledBar:
     """闸门 2 被 ``needs_repair`` 顶开时，**不能**拿今天那根还没定稿的 bar。
 
-    16:00 ET 那条 cron 正好是敲钟那一刻，``settle_minutes: 60`` 一分钟都没过。
+    16:00 ET 正好是敲钟那一刻，``settle_minutes``（330）一分钟都没过。
     闸门 3 比的是日期相等（今天，通过），闸门 4 的阈值是 50% 日内波动
     与 2% 跨源差（preliminary 与 consolidated 的差是千分位，通过）——
     两道后闸门都拦不住，写进去的就是一个**会变的数字**。
@@ -178,7 +178,7 @@ class TestRepairNeverUsesTodaysUnsettledBar:
         today = sessions[-1].date
         _install_plan(rd, monkeypatch, sessions, _no_revision())
         monkeypatch.setattr(rd, "fetch_window", lambda *a, **k: FetchOutcome(frame=pd.DataFrame()))
-        now = datetime.combine(today, time(17, 30), tzinfo=ET)
+        now = datetime.combine(today, time(22, 0), tzinfo=ET)
         report = rd.run_once(FakeConn(), cfg, now=now)
         assert report.session_date == today
 
@@ -208,7 +208,7 @@ class TestEveryoneLaggingWritesNothing:
                 per_symbol_source=dict.fromkeys(symbols, "yfinance"),
             ),
         )
-        now = datetime.combine(today, time(17, 30), tzinfo=ET)
+        now = datetime.combine(today, time(22, 0), tzinfo=ET)
         report = rd.run_once(FakeConn(), cfg, now=now)
 
         assert report.status == "stale_vendor"
@@ -236,12 +236,98 @@ class TestRankingsAreNeverBlanked:
                 per_symbol_source=dict.fromkeys(symbols, "yfinance"),
             ),
         )
-        now = datetime.combine(today, time(17, 30), tzinfo=ET)
+        now = datetime.combine(today, time(22, 0), tzinfo=ET)
         report = rd.run_once(FakeConn(), cfg, now=now)
 
         assert report.status in {"ok", "partial", "ok_events_stale", "stale_vendor"}
         empty = [day for day, rows in calls["replace_strength"] if not rows]
         assert empty == [], f"这些天被拿 [] 调用了 replace_strength：{empty}"
+
+
+class TestTheWarmupEdgeDoesNotCryWolf:
+    """窗口最左端那 ``min_bars - 1`` 天**按定义**排不出横截面，不该告警。
+
+    排序分 ``mom_20`` 的硬闸门是 ``min_bars: 21``，于是本窗口最早的 20 个
+    交易日上池内每一只的分数都是 NULL，``compute_strength`` 只能返回空表。
+    它**每一跑都在**，而且随窗口右移每天换一批日期。
+
+    实测代价（2026-09-24…09-30）：``daily`` 每一跑都带着
+    「20 天算不出横截面」并 ``escalate("partial")`` → exit 1 → 每天都红。
+    于是 09-29 那天真正的 ``stale_vendor`` 淹在噪音里没人看见 ——
+    正是 ``invariants.sql`` 里写了三遍的那条：
+    「长期飘红的断言会把整套补偿策略训练成『反正它总是红的』」。
+    """
+
+    def test_it_is_exactly_the_leading_min_bars_minus_one_sessions(self) -> None:
+        import pipeline.run_daily as rd
+
+        cfg = load_config()
+        sessions = _sessions(60)
+        warm = rd._structural_blanks(sessions, sessions[0].date, cfg)
+        assert warm == {s.date for s in sessions[:20]}, "mom_20 的 min_bars 是 21"
+
+    def test_a_day_past_the_edge_is_not_claimed_as_structural(self) -> None:
+        import pipeline.run_daily as rd
+
+        cfg = load_config()
+        sessions = _sessions(60)
+        warm = rd._structural_blanks(sessions, sessions[0].date, cfg)
+        assert warm is not None
+        assert sessions[20].date not in warm, "第 21 根起就该算得出来，排不出就是真失败"
+
+    def test_a_later_start_slides_the_edge_with_it(self) -> None:
+        """窗口右移时这段也跟着移 —— 它跟的是 ``start``，不是绝对日期。"""
+        import pipeline.run_daily as rd
+
+        cfg = load_config()
+        sessions = _sessions(60)
+        warm = rd._structural_blanks(sessions, sessions[5].date, cfg)
+        assert warm == {s.date for s in sessions[5:25]}
+
+    def test_an_unmeasurable_score_metric_claims_nothing(self) -> None:
+        """排序分不是 metrics.yaml 里的指标（如 ``composite``）时返回 ``None``。
+
+        此时调用方照旧全部升级 —— **宁可多告警，不可少告警**。
+        """
+        import pipeline.run_daily as rd
+
+        class _Metrics:
+            @staticmethod
+            def by_id(_: str) -> None:
+                return None
+
+        class _Strength:
+            score_metric = "composite"
+
+        class _Cfg:
+            metrics = _Metrics()
+            strength = _Strength()
+
+        sessions = _sessions(60)
+        assert rd._structural_blanks(sessions, sessions[0].date, _Cfg()) is None  # type: ignore[arg-type]
+
+    def test_a_full_run_notes_the_edge_without_escalating(self, harness: Any) -> None:
+        """整跑一次：左端那段只该进 ``note``，**不该**带出升级那句话。"""
+        _, monkeypatch, rd = harness
+        cfg = load_config()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
+        days = [s.date for s in sessions]
+        _install_plan(rd, monkeypatch, sessions, _no_revision())
+        monkeypatch.setattr(
+            rd,
+            "fetch_window",
+            lambda *a, **k: FetchOutcome(
+                frame=_frame(symbols, days),
+                per_symbol_source=dict.fromkeys(symbols, "yfinance"),
+            ),
+        )
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
+        assert "窗口最左端" in report.message, "左端那段仍然要如实记一笔"
+        assert "算不出横截面，已跳过而非清空" not in report.message, (
+            "左端是定义使然，不该走升级那条分支"
+        )
 
 
 class TestAbsentSymbolsKeepTheirHistoricalRankings:
@@ -288,7 +374,7 @@ class TestAbsentSymbolsKeepTheirHistoricalRankings:
                     {"symbol": absent, "date": d, c: 99.0} for d in days
                 ],
             )
-        rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(17, 30), tzinfo=ET))
+        rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
         historical = [(d, r) for d, r in calls["replace_strength"] if r and d != today]
         assert historical, "应当有历史天被重排"
         del col

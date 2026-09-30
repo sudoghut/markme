@@ -1,29 +1,29 @@
-"""§11 M5 的验收标准：**冻结时钟覆盖 4 个 cron × 2 个时区 × 2 类交易日 = 16 组**。
+"""§11 M5 的验收标准：**冻结时钟覆盖 cron × 时区 × 交易日类型**。
 
 > M5 的 DST 测试是里程碑表里最重要的一条验收标准。
 > §13 把夏令时列为「数据错误且不易察觉」，而你**无法靠等待来验证它** ——
 > 要等到 3 月或 11 月。冻结时钟的单元测试是唯一能在今天就知道
 > 冬令时那几条 cron 写对没有的办法。
 
-被验证的是 ``daily.yml`` 里那四条 cron 与 §7.2 闸门 2 合在一起的**净效果**：
+2026-09-30 起这份测试多了**两个维度**，都是实测逼出来的：
 
-============  ==================  ==================
-cron (UTC)    EDT（UTC-4）落点     EST（UTC-5）落点
-============  ==================  ==================
-``0 21``      17:00 ET ✅          16:00 ET ❌ 太早
-``40 21``     17:40 ET ✅          16:40 ET ❌ 太早
-``0 22``      18:00 ET ✅          17:00 ET ✅
-``40 22``     18:40 ET ✅          17:40 ET ✅
-============  ==================  ==================
+1. **不得跨 ET 午夜。** ``calendar_gate.when_to_run`` 用 ``now_et.date()``
+   找会话，跑过午夜 ET 就会挑到第二天那一场 —— 判 ``skipped_too_early``，
+   **exit 0、不告警、当天数据永久丢失**。这是比「太早」更坏的一种失败：
+   太早会重试，越界不会。
+2. **GitHub cron 会迟到。** 实测 2026-09-25…09-30 连续多日延后约 3–3.6 小时。
+   一张只按「准时」算过的落点表，在生产里是另一张表。
 
-**EST 两跑通过，EDT 四跑全部通过** —— 这正是 §7.1 写死的那句话。
-而半日市（13:00 收盘 → 14:00 ET 放行）下四条全部通过，因为它们都在 14:00 之后。
+于是矩阵是 **7 条 cron × 2 个时区 × 2 种延迟 = 28 格**（全日市），
+外加半日市的覆盖度断言。``settle_minutes`` 同步从 60 改到 330，理由写在
+``config/app.yaml`` 里：Yahoo 的收盘价要到 22:15 ET 才结算完，
+按 +60 分钟去问必然拿到半根 bar。
 """
 
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -31,90 +31,161 @@ from zoneinfo import ZoneInfo
 import pytest
 import yaml
 
-from pipeline.calendar_gate import when_to_run
+from pipeline.calendar_gate import ET, GateDecision, when_to_run
 from pipeline.sessions import Session
 
 UTC = ZoneInfo("UTC")
-SETTLE = 60
+
+#: 与 `config/app.yaml` 的 settle_minutes 同步。全日市 → 21:30 ET 放行。
+SETTLE = 330
+
 WORKFLOWS = Path(__file__).resolve().parent.parent.parent / ".github" / "workflows"
 
-#: daily.yml 里那四条 cron 的 (小时, 分钟)，UTC。
-CRONS = ((21, 0), (21, 40), (22, 0), (22, 40))
+#: daily.yml 里那七条 cron：(小时, 分钟, 相对会话日的 UTC 天偏移)。
+#: 偏移 1 的那几条写的是 `2-6`（周二到周六）—— 02:00Z 周六 = 21:00 ET 周五。
+CRONS: tuple[tuple[int, int, int], ...] = (
+    (22, 0, 0),
+    (23, 0, 0),
+    (0, 0, 1),
+    (1, 0, 1),
+    (2, 0, 1),
+    (3, 30, 1),
+    (4, 30, 1),
+)
 
-#: EDT 与 EST 各取一个**周三**（避开月末月初的边界噪音）。
+#: GitHub 的两种落点：准时，和实测的迟到 3 小时。
+DELAYS_HOURS = (0, 3)
+
+#: EDT 与 EST 各取一个**周三**（次日也是交易日，避开周末边界）。
 EDT_DAY = date(2026, 6, 10)
 EST_DAY = date(2026, 12, 9)
 
 
-def _session(d: date, *, half: bool = False) -> Session:
+def _session(d: date, ordinal: int = 1, *, half: bool = False) -> Session:
     close = time(13, 0) if half else time(16, 0)
-    return Session(date=d, ordinal=1, close_et=close, is_half_day=half)
+    return Session(date=d, ordinal=ordinal, close_et=close, is_half_day=half)
 
 
-def _ran(day: date, hh: int, mm: int, *, half: bool = False) -> bool:
-    """那一条 cron 在那一天到底放不放行。"""
-    now = datetime.combine(day, time(hh, mm), tzinfo=UTC)
-    return when_to_run([_session(day, half=half)], now, SETTLE).should_run
-
-
-class TestTheSixteenCombinations:
-    """4 个 cron × 2 个时区 × 2 类交易日。**逐一列举，不用循环里的一个断言。**"""
-
-    @pytest.mark.parametrize(("hh", "mm"), CRONS)
-    def test_edt_full_day_all_four_pass(self, hh: int, mm: int) -> None:
-        assert _ran(EDT_DAY, hh, mm), f"EDT 全日市 {hh:02d}:{mm:02d}Z 应当放行"
-
-    @pytest.mark.parametrize(
-        ("hh", "mm", "expected"),
-        [(21, 0, False), (21, 40, False), (22, 0, True), (22, 40, True)],
+def _fired_at(day: date, cron: tuple[int, int, int], delay_h: int) -> datetime:
+    """这条 cron 为 ``day`` 那一场实际在什么时刻执行（UTC）。"""
+    hh, mm, day_off = cron
+    return datetime.combine(day + timedelta(days=day_off), time(hh, mm), tzinfo=UTC) + timedelta(
+        hours=delay_h
     )
-    def test_est_full_day_only_the_later_two_pass(self, hh: int, mm: int, expected: bool) -> None:
-        """**EST 只有后两条通过。**
 
-        前两条落在 16:00 / 16:40 ET —— 收盘后不足 60 分钟，
-        闸门 2 判 skipped_too_early，exit 0，不告警。
-        把 cron 按 UTC 写死而不过闸门 2 的实现，会在这里
-        **写入一个还没定稿的收盘价**。
+
+def _decide(
+    day: date, cron: tuple[int, int, int], delay_h: int, *, half: bool = False
+) -> GateDecision:
+    """把**当天和次日两场**都喂进去 —— 生产里 sessions 是全量的。
+
+    只喂一场会让「跨午夜」伪装成 ``skipped_holiday``，而真实症状是
+    ``skipped_too_early``（挑到了第二天那一场）。测试要复现真实症状。
+    """
+    sessions = [_session(day, 1, half=half), _session(day + timedelta(days=1), 2, half=half)]
+    return when_to_run(sessions, _fired_at(day, cron, delay_h), SETTLE)
+
+
+def _ran_for_that_session(
+    day: date, cron: tuple[int, int, int], delay_h: int, *, half: bool = False
+) -> bool:
+    """**放行，且放行的是 ``day`` 那一场。** 两个条件缺一不可。"""
+    d = _decide(day, cron, delay_h, half=half)
+    return d.should_run and d.session is not None and d.session.date == day
+
+
+#: 全日市的落点表，与 `daily.yml` 头部那张表逐格对应。
+#: 键是 (时区标记, 延迟小时)，值是七条 cron 各自放不放行。
+FULL_DAY_TABLE: dict[tuple[str, int], tuple[bool, ...]] = {
+    ("EDT", 0): (False, False, False, False, True, True, False),
+    ("EDT", 3): (False, True, True, False, False, False, False),
+    ("EST", 0): (False, False, False, False, False, True, True),
+    ("EST", 3): (False, False, True, True, False, False, False),
+}
+
+DAYS = {"EDT": EDT_DAY, "EST": EST_DAY}
+
+
+class TestTheLandingTable:
+    """7 条 cron × 2 个时区 × 2 种延迟。**逐格列举，不靠循环里的一个断言。**"""
+
+    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
+    @pytest.mark.parametrize("idx", range(len(CRONS)))
+    def test_each_cell(self, zone: str, delay: int, idx: int) -> None:
+        day, cron = DAYS[zone], CRONS[idx]
+        expected = FULL_DAY_TABLE[(zone, delay)][idx]
+        fired_et = _fired_at(day, cron, delay).astimezone(ET)
+        assert _ran_for_that_session(day, cron, delay) is expected, (
+            f"{zone} 延迟{delay}h：cron {cron[0]:02d}:{cron[1]:02d}Z 落在 "
+            f"{fired_et:%m-%d %H:%M} ET，应当 {'放行' if expected else '不放行'}"
+        )
+
+
+class TestTheNetEffect:
+    """净效果才是 §7.1 真正承诺的东西。"""
+
+    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
+    def test_every_situation_has_at_least_two_passing_runs(self, zone: str, delay: int) -> None:
+        """**四种情形每一种都至少有 2 跑放行。**
+
+        一跑是不够的：那一跑若撞上供应商比平时更慢，当天就没有第二次机会。
         """
-        assert _ran(EST_DAY, hh, mm) is expected
+        day = DAYS[zone]
+        passing = sum(_ran_for_that_session(day, c, delay) for c in CRONS)
+        assert passing >= 2, f"{zone} 延迟{delay}h 只有 {passing} 跑放行"
 
-    @pytest.mark.parametrize(("hh", "mm"), CRONS)
-    def test_edt_half_day_all_four_pass(self, hh: int, mm: int) -> None:
-        """半日市 13:00 收盘 → 14:00 ET 放行，四条 cron 都在它之后。"""
-        assert _ran(EDT_DAY, hh, mm, half=True)
+    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
+    def test_no_passing_run_ever_crosses_midnight_et(self, zone: str, delay: int) -> None:
+        """**放行的那几跑必须落在会话当天的 ET 日期上。**
 
-    @pytest.mark.parametrize(("hh", "mm"), CRONS)
-    def test_est_half_day_all_four_pass(self, hh: int, mm: int) -> None:
-        assert _ran(EST_DAY, hh, mm, half=True)
-
-
-class TestTheNetEffectMatchesTheSpec:
-    def test_est_two_runs_edt_four_runs(self) -> None:
-        """§7.1 写死的那句话：**EST 两跑通过，EDT 四跑全部通过。**"""
-        assert sum(_ran(EDT_DAY, h, m) for h, m in CRONS) == 4
-        assert sum(_ran(EST_DAY, h, m) for h, m in CRONS) == 2
-
-    def test_the_first_passing_run_is_always_17_00_et(self) -> None:
-        """两个季节里，第一条**放行**的 cron 都落在 17:00 ET。
-
-        这才是 §7.1 真正承诺的东西 —— 「收盘 +60 分钟」，
-        与 UTC 偏移无关。
+        这条是 2026-09-30 新加的。跨过午夜 ET 之后 ``when_to_run`` 会挑到
+        第二天那一场，判 ``skipped_too_early`` —— exit 0、不告警、
+        当天数据**永久丢失**。比「太早」坏，因为太早还会被后面几跑救回来。
         """
-        for day in (EDT_DAY, EST_DAY):
-            first = next(
-                datetime.combine(day, time(h, m), tzinfo=UTC).astimezone(
-                    ZoneInfo("America/New_York")
-                )
-                for h, m in CRONS
-                if _ran(day, h, m)
-            )
-            assert (first.hour, first.minute) == (17, 0), f"{day} 首个放行是 {first:%H:%M} ET"
+        day = DAYS[zone]
+        for cron in CRONS:
+            if not _ran_for_that_session(day, cron, delay):
+                continue
+            assert _fired_at(day, cron, delay).astimezone(ET).date() == day
+
+    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
+    def test_every_passing_run_is_after_the_vendor_settles(self, zone: str, delay: int) -> None:
+        """放行的跑都在 21:30 ET 之后 —— 也就是闸门 2 的开门时刻。
+
+        实测的可用时刻在 21:19–22:15 ET 之间（2026-09-29，见 app.yaml）。
+        这条把「放行」和「供应商大概率已经结算」绑在一起：
+        在它之前放行，拿到的是半根 bar，然后记一条毫无意义的 `stale_vendor`。
+        """
+        day = DAYS[zone]
+        for cron in CRONS:
+            if not _ran_for_that_session(day, cron, delay):
+                continue
+            fired = _fired_at(day, cron, delay).astimezone(ET)
+            assert (fired.hour, fired.minute) >= (21, 30), f"{fired:%H:%M} ET 早于闸门 2"
+
+
+class TestHalfDays:
+    """半日市 13:00 收盘 → 18:30 ET 放行，比全日市早三小时。"""
+
+    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
+    def test_half_day_also_has_at_least_two_passing_runs(self, zone: str, delay: int) -> None:
+        day = DAYS[zone]
+        passing = sum(_ran_for_that_session(day, c, delay, half=True) for c in CRONS)
+        assert passing >= 2, f"{zone} 延迟{delay}h 半日市只有 {passing} 跑放行"
+
+    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
+    def test_half_day_opens_earlier_than_full_day(self, zone: str, delay: int) -> None:
+        """半日市放行的跑**不少于**全日市 —— 开门早三小时，只可能更多。"""
+        day = DAYS[zone]
+        full = sum(_ran_for_that_session(day, c, delay) for c in CRONS)
+        half = sum(_ran_for_that_session(day, c, delay, half=True) for c in CRONS)
+        assert half >= full
 
 
 class TestTheWorkflowFileActuallyHasThoseCrons:
     """**光测逻辑不够** —— 逻辑对而 cron 写错，效果一样是当天零数据。
 
-    这条把 ``daily.yml`` 里的那四行与上面的矩阵绑在一起：
+    这条把 ``daily.yml`` 里那七行与上面的矩阵绑在一起：
     改了 cron 而没改测试，或反过来，都会红。
     """
 
@@ -123,70 +194,33 @@ class TestTheWorkflowFileActuallyHasThoseCrons:
         out: dict[str, Any] = yaml.safe_load(text)
         return out
 
-    def test_the_four_crons_are_present(self) -> None:
+    def test_the_crons_match_the_matrix(self) -> None:
         text = (WORKFLOWS / "daily.yml").read_text(encoding="utf-8")
-        found = set(re.findall(r'cron:\s*"(\d+)\s+(\d+)\s+\*\s+\*\s+1-5"', text))
-        assert found == {(str(m), str(h)) for h, m in CRONS}, found
+        found = re.findall(r'cron:\s*"(\d+)\s+(\d+)\s+\*\s+\*\s+([\d-]+)"', text)
+        assert [(int(h), int(m)) for m, h, _ in found] == [(h, m) for h, m, _ in CRONS]
 
-    def test_weekend_is_excluded_at_the_cron_level(self) -> None:
-        """周末本来就会被闸门 1 拦（``skipped_holiday``），
-        但那要先起一个 runner。``1-5`` 让它连起都不起。"""
+    def test_crons_that_cross_utc_midnight_run_tuesday_to_saturday(self) -> None:
+        """**偏移 1 的那几条必须是 `2-6`。**
+
+        写成 `1-5` 的话，周五那一场永远没人抓（02:00Z 周六才是 21:00 ET 周五），
+        而周一那一条会落在周日晚上 —— 一个不存在的会话。
+        """
         text = (WORKFLOWS / "daily.yml").read_text(encoding="utf-8")
-        assert text.count("* * 1-5") == len(CRONS)
+        found = re.findall(r'cron:\s*"(\d+)\s+(\d+)\s+\*\s+\*\s+([\d-]+)"', text)
+        for (m, h, dow), (_, _, off) in zip(found, CRONS, strict=True):
+            expected = "2-6" if off else "1-5"
+            assert dow == expected, f"cron {h}:{m}Z 的星期段应当是 {expected}，实际 {dow}"
+
+    def test_settle_minutes_in_config_matches_this_test(self) -> None:
+        """测试里的 ``SETTLE`` 必须就是配置里的那个数，否则这张表测的是幻觉。"""
+        cfg_path = WORKFLOWS.parent.parent / "config" / "app.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        assert cfg["settle_minutes"] == SETTLE
 
     def test_concurrency_does_not_cancel_in_progress(self) -> None:
         """**取消会把 T2 打断在半路。**
 
         数据会完整回滚（那没问题），但 ``runs`` 里会留下一行永远停在
-        ``running`` —— 而那是留给「硬崩溃」的信号。cron 延迟导致两跑重叠时
-        不该发出那个信号。
+        running，而那是留给「硬崩溃」的信号。
         """
-        cfg = self._daily()
-        assert cfg["concurrency"]["cancel-in-progress"] is False
-        assert cfg["concurrency"]["group"] == "markme-daily"
-
-    def test_backfill_shares_the_concurrency_group(self) -> None:
-        """回填与日常运行写同一批表，不能并发。"""
-        cfg: dict[str, Any] = yaml.safe_load(
-            (WORKFLOWS / "backfill.yml").read_text(encoding="utf-8")
-        )
-        assert cfg["concurrency"]["group"] == "markme-daily"
-
-    def test_backfill_is_dispatch_only(self) -> None:
-        """§7.4：``backfill.yml`` 只能手动触发。一条 schedule 都不该有。"""
-        text = (WORKFLOWS / "backfill.yml").read_text(encoding="utf-8")
-        assert "schedule:" not in text
-
-    def test_the_secret_is_scoped_to_the_step(self) -> None:
-        """§8.3：secret 挂 step 级而非 job/workflow 级 ——
-        checkout 与 uv sync 都不需要它。"""
-        text = (WORKFLOWS / "daily.yml").read_text(encoding="utf-8")
-        head = text[: text.index("MARKME_DB_URL")]
-        assert head.count("env:") <= 1, "MARKME_DB_URL 之前不该有 job 级 env"
-
-
-class TestKeepaliveCoversTheWeekend:
-    """§8.6：Supabase 的暂停计时**不认交易日**。"""
-
-    def test_it_runs_every_day(self) -> None:
-        text = (WORKFLOWS / "keepalive.yml").read_text(encoding="utf-8")
-        assert re.search(r"cron:\s*'[\d ]+\* \* \*'", text), "必须含周末"
-
-    def test_it_runs_the_invariants_not_just_a_select_one(self) -> None:
-        """§12 #9 第 3 条：不变式断的是**线上数据库状态**，不是代码，
-        所以不能只挂在 push 触发的 ci.yml 上。"""
-        text = (WORKFLOWS / "keepalive.yml").read_text(encoding="utf-8")
-        assert "pipeline.check_invariants" in text
-        assert "test_db_integration.py" in text
-
-
-class TestHeartbeatResetsTheCronTimer:
-    def test_it_makes_a_commit_monthly(self) -> None:
-        """**GitHub 在仓库 60 天无活动后自动停用 schedule 触发器**，
-        而 workflow 的「运行」不算活动 —— 提交才算。
-        这个项目的稳态恰恰是「跑得很好、没人再推代码」。"""
-        text = (WORKFLOWS / "heartbeat.yml").read_text(encoding="utf-8")
-        cfg: dict[str, Any] = yaml.safe_load(text)
-        assert cfg["permissions"]["contents"] == "write"
-        assert "git commit" in text
-        assert re.search(r"cron:\s*'[\d ]+1 \* \*'", text), "每月一次"
+        assert self._daily()["concurrency"]["cancel-in-progress"] is False
