@@ -31,7 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pipeline.calendar_gate import ET, session_on_or_before
+from pipeline.calendar_gate import ET, last_settled_session
 from pipeline.config import load_config
 from pipeline.sessions import build_sessions, load_calendar
 
@@ -48,6 +48,7 @@ FIELDS = (
     "session_date",
     "symbol",
     "has_row",
+    "prior_bars",
     "adj_close",
     "close",
     "open",
@@ -60,6 +61,10 @@ FIELDS = (
 #: 而 GitHub 的延迟会把它们摊得更开 —— 这正是我们想要的覆盖面。
 INTERVAL_SECONDS = 15 * 60
 SAMPLES_PER_RUN = 8
+
+#: 离收盘超过这么久就不采了 —— 那一场早已定稿，采它只是噪音。
+#: 12 小时足够覆盖「收盘 + GitHub 延后 3.6h + 自采 2h」，又挡得住周末的误触发。
+MAX_SESSION_AGE = timedelta(hours=12)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +108,14 @@ def sample_once(
     """
     stamp = now or datetime.now(tz=UTC)
     fn = download or _yf_download
+    # **抓 5 个日历日，不是 1 天。** 多出来的那几根是「这次请求确实成功了」的证据：
+    # `fetch.py` 自己把这条列为最容易漏的一条 —— 抓不到的 ticker **不抛异常**，
+    # 它只是返回一整块 NaN。只抓 1 天的话，限流返回的空帧和
+    # 「供应商还没发布这一天」在 CSV 里一模一样，而这张表的唯一用途是求
+    # 结算时刻的分布：任何一次软失败都会把它整体往后推，然后变成生产阈值。
     raw = fn(
         list(symbols),
-        start=session_date.isoformat(),
+        start=(session_date - timedelta(days=5)).isoformat(),
         end=(session_date + timedelta(days=1)).isoformat(),
         auto_adjust=False,  # 与 fetch.py 相同 —— 必须观测生产走的那条路径
         progress=False,
@@ -115,7 +125,6 @@ def sample_once(
     out: list[Sample] = []
     for sym in symbols:
         values: dict[str, float | None] = {}
-        has_row = False
         for field, column in (
             ("adj_close", "Adj Close"),
             ("close", "Close"),
@@ -127,8 +136,35 @@ def sample_once(
             values[field] = _cell(raw, column, sym, session_date)
         # 「这一行在不在」= 供应商给没给这一天；与「值是不是 NaN」是两件事。
         has_row = any(v is not None for v in values.values())
+        values["prior_bars"] = float(_prior_bars(raw, sym, session_date))
         out.append(Sample(stamp, session_date, sym, has_row, values))
     return out
+
+
+def _prior_bars(raw: Any, symbol: str, day: date) -> int:
+    """``day`` **之前**那几根有 ``adj_close`` 的 bar 有几根。
+
+    0 = 这次请求什么都没拿到（限流 / 整块 NaN / 空帧）——
+    与「今天这一根还没结算」是完全不同的两件事，而它们在只抓一天时长得一样。
+    """
+    import pandas as pd
+
+    if raw is None or getattr(raw, "empty", True):
+        return 0
+    try:
+        frame: pd.DataFrame = raw
+        col = (
+            frame[("Adj Close", symbol)]
+            if isinstance(frame.columns, pd.MultiIndex)
+            else frame["Adj Close"]
+        )
+        index = pd.DatetimeIndex(col.index)
+        if index.tz is not None:
+            index = index.tz_localize(None)
+        before = col[index.normalize() < pd.Timestamp(day)]
+        return int(before.notna().sum())
+    except (KeyError, IndexError, AttributeError):
+        return 0
 
 
 def _cell(raw: Any, column: str, symbol: str, day: date) -> float | None:
@@ -172,10 +208,23 @@ def main() -> int:
     today_et = now.astimezone(ET).date()
 
     sessions = build_sessions(load_calendar(), today_et - timedelta(days=14), today_et)
-    session = session_on_or_before(sessions, today_et)
-    if session is None or session.date != today_et:
-        # 非交易日（含延迟到次日凌晨、ET 日期已翻页的情形）。**不采样、不报错。**
-        print(f"vendor-probe: {today_et} 不是交易日，跳过")
+    if not sessions:
+        print("vendor-probe: 日历里没有 session，跳过")
+        return 0
+
+    # **要采的是「最后一个已经收盘的 session」，不是「今天」。**
+    #
+    # 初版写的是 `session_on_or_before(...).date != today_et` —— 那把
+    # `session_on_or_before` 退化成了「今天是不是交易日」，而 GitHub 实测延后
+    # 3–3.6 小时：四个槽里有两个会落到次日凌晨，于是要么去采一场**还没开盘**的
+    # session（8×17 行噪音），要么在周六直接跳过 —— **周五那条尾巴每周丢一次**，
+    # 而傍晚那两个晚槽正是这个探针存在的全部理由。
+    session = last_settled_session(sessions, now, 0)
+    close_et = datetime.combine(session.date, session.close_et, tzinfo=ET)
+    age = now.astimezone(ET) - close_et
+    if age > MAX_SESSION_AGE:
+        # 周末/假日里被 dispatch 到，或 cron 延后到离谱 —— 那一场早就定稿了，采它没意义。
+        print(f"vendor-probe: 最近一场 {session.date} 已收盘 {age}，太老，跳过")
         return 0
 
     out = Path("docs/probe/vendor-settle.csv")

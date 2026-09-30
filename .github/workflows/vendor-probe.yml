@@ -9,17 +9,32 @@ name: vendor-probe
 # 而这两个数之间只有 15 分钟余量。M11 与 M12 反复栽的正是
 # 「把一条局部观察升格成通用判据」—— 这个探针把它换成有分布支撑的数。
 #
-# **它只读。** 不带任何数据库凭据，不连库、不写任何表。
-# `test_vendor_probe.py` 把这一条钉住了：一旦文件里出现数据库 secret 的名字，CI 会红。
+# ── 三条设计约束，每一条都是闸门审查逼出来的 ──────────────────────────
 #
-# **为什么是四条错开的 cron，而不是一条长任务。**
+# **1. 只读，而且连写权限都不给。** 早先那一版把采样结果 commit 回 `main`，
+#    于是需要 `contents: write`。三个后果叠在一起：违反 `AGENTS.md` 的
+#    「不直接推 `main`」（`heartbeat.yml` 是有成文论证的**例外**，每月一次，
+#    不是可以扩展的先例）；`ci.yml` 是 `on: push: branches: [main]`，
+#    两周 40 次提交会换来约 120 次多余 CI；而一个带 `contents: write`
+#    的 workflow 是整条分支里风险最高的一处。
+#    **改走 artifact 之后这三件事一起消失**，权限降到 `read`。
+#
+# **2. 采样结果必须能在 job 失败时也带出来。** 早先那一版在推送失败时
+#    打印「数据会在下一跑一并带上」—— 那是假话：下一跑是全新的 checkout，
+#    runner 连同那份 CSV 一起销毁。所以 upload 步骤挂 `if: always()`。
+#
+# **3. 第三方 action 按 commit SHA 钉版本**（`docs/create-project.md` §8.3）。
+#    仓库里其余 5 个 workflow 全部钉了 SHA，只有这个曾经用浮动 tag。
+#
+# ── 为什么是四条错开的 cron，而不是一条长任务 ────────────────────────
 # GitHub 会把 schedule 延后 3 小时以上（M12 实测），一条长任务的起点因此不可控。
 # 四条错开、每条自采 8 次（间隔 15 分钟，覆盖 2 小时），无论迟到多少，
 # 合起来都能盖住傍晚那一整段。**记录的是真实墙上时刻，不是 cron 的预定时刻。**
 #
-# 跑够两周后：算「17 只全部结算完」的时刻分布 → 重定那两个阈值 →
-# 删掉本文件、`pipeline/vendor_probe.py`、`pipeline/tests/test_vendor_probe.py`
-# 与 `docs/probe/`。BACKLOG 里有这条待办。
+# 跑够两周后：`gh run list -w vendor-probe` + `gh run download` 把 artifact 合起来，
+# 算「17 只全部结算完」的时刻分布 → 重定那两个阈值 →
+# 删掉本文件、`pipeline/vendor_probe.py`、`pipeline/tests/test_vendor_probe.py`。
+# BACKLOG 里有这条待办。
 on:
   schedule:
     - cron: "30 20 * * 1-5" # EDT 16:30 ET（收盘后半小时）/ EST 15:30（盘中，照样采）
@@ -28,42 +43,41 @@ on:
     - cron: "30 2 * * 2-6" # EDT 22:30 / EST 21:30
   workflow_dispatch:
 
+# **只读。** 采样结果走 artifact，不需要任何写权限。
 permissions:
-  contents: write # 只为把采样结果提交回仓库
+  contents: read
 
 concurrency:
   # **不能和 markme-daily 同组** —— 探针一跑近两小时，同组会把管道堵在后面。
   group: markme-vendor-probe
   cancel-in-progress: false
 
+env:
+  # 与 ci.yml 同一个理由：不显式传，uv 会挑 runner 自带的解释器，
+  # 而 uv.lock 带着 python_full_version 标记，换解释器会装出不同的包集合。
+  # 探针的立论是「必须和生产装同一套 yfinance」，这里尤其不能省。
+  PYTHON_VERSION: "3.13"
+
 jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 150 # 8 次 × 15 分钟 = 约 1h45m，留裕量
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
       - run: uv sync --locked
       - name: 采样
         run: uv run python -m pipeline.vendor_probe
-      - name: 提交采样结果
-        run: |
-          if [ -z "$(git status --porcelain docs/probe)" ]; then
-            echo "没有新数据（非交易日或全部采样失败），不提交"
-            exit 0
-          fi
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/probe
-          git commit -m "chore(probe): 供应商结算时刻采样 $(date -u +%Y-%m-%dT%H:%MZ)"
-          # 四条 cron 可能因为延迟而重叠；concurrency 已经排队，
-          # 但仍可能与 heartbeat/dependabot 的提交撞上，所以 rebase 后重试。
-          for i in 1 2 3; do
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
-              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
-            sleep $((i * 5))
-          done
-          echo "推送失败三次，放弃（采样数据会在下一跑一并带上）"
-          exit 1
+      - name: 带出采样结果
+        # **`always()` 是载重的**：超时或被取消时，已经采到的那些行也要带出来。
+        if: always() && hashFiles('docs/probe/*.csv') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # run_id + run_attempt 保证不重名；合并时按文件名排序即可。
+          name: vendor-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: docs/probe/*.csv
+          retention-days: 90
+          if-no-files-found: ignore
