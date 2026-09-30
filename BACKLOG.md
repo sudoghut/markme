@@ -168,3 +168,11 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 - **GitHub cron 的延迟（实测 3–3.6h）是整张落点表的地基，却只有「3 小时」
   进了测试**（`DELAYS_HOURS = (0, 3)`）。延迟一变，`daily.yml` 的散文、那张表、
   和 `DELAYS_HOURS` 三者同时失真，而只有第三者会让 CI 红。
+- **探针是临时的，用完要删。** `.github/workflows/vendor-probe.yml`、
+  `pipeline/vendor_probe.py`、`pipeline/tests/test_vendor_probe.py`、`docs/probe/`。
+  跑够两周后：算「17 只全部结算完」的时刻分布 → 用它重定 `settle_minutes` 与
+  `vendor_deadline_et`（现在这两个数之间只有 15 分钟余量，且建立在一天的
+  两个观测点上）→ 然后删掉上面四样。
+- **`daily.yml` 的落点表只验到 4 小时延迟。** 闸门 A 第 3 轮实测：延迟 >4h 时
+  开始出现单跑/零跑格（2026-03-09 延迟 5h 只剩 1 跑、6h 归零）。
+  而 `0 22` 那条注释声称自己是为「>3.5h」准备的 —— 这个区间没有任何断言。
