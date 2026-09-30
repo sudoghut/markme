@@ -2,6 +2,8 @@ name: daily
 
 # 美股正常收盘 16:00 ET，触发取**收盘 +330 分钟**（§7.1 / `config/app.yaml`）。
 #
+# **宁可晚几小时，不要一个会变的数字。**
+#
 # **为什么是 5.5 小时而不是 1 小时。** 原设计假设「16:15–16:30 ET
 # consolidated close 就稳定」。2026-09-29 的实测推翻了它：21:19 ET 时
 # Yahoo 那根 bar 还是半根（只有 Open 与 Volume，`Close=NaN`），

@@ -209,7 +209,7 @@ class TestLastSettledSession:
     日历历史修订会把闸门 1/2 顶开（§9.1.4），而 ``when_to_run`` 在
     ``skipped_too_early`` 分支里返回的 ``session`` 是**今天** ——
     它是给「还要等到几点」那条消息用的，不是「该算哪一天」的答案。
-    直接拿它去抓，16:00 ET 那条 cron 上就是敲钟那一刻的价。
+    直接拿它去抓，16:00 ET（手动 dispatch 的最早时刻）上就是敲钟那一刻的价。
 
     这一组是**行为测试**。修复路径此前只有源码 grep 断言
     （``assert "write_from < start" in code``），而 grep 抓不到

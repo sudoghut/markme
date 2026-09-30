@@ -172,7 +172,7 @@ export default async function States({
 
       <Block
         title={`② 数据陈旧（落后 ≥ ${STALE_AFTER_DAYS} 个日历日）`}
-        note={`dead-man 场景。判据是日历日不是交易日 —— 管道收盘后一小时才写入，当天、周末、假日落后都是常态，按交易日判会天天亮一次黄条（理由见 lib/market.ts 的 STALE_AFTER_DAYS）。亮起来之后两个数都印：触发用的日历日，以及漏了几根 bar 的交易日数。`}
+        note={`dead-man 场景。判据是日历日不是交易日 —— 管道要等数据源结算完收盘价、当晚才写入，当天、周末、假日落后都是常态，按交易日判会天天亮一次黄条（理由见 lib/market.ts 的 STALE_AFTER_DAYS）。亮起来之后两个数都印：触发用的日历日，以及漏了几根 bar 的交易日数。`}
       >
         <StaleBanner asOf="2026-08-14" sessionsBehind={26} daysBehind={STALE_DEMO_DAYS} />
         {/* 正常落后（周五收盘、周二来看）——**故意放一个渲染为 null 的调用**。

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, time
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -381,6 +381,8 @@ class SiteConfig(_Strict):
 class AppConfig(_Strict):
     site: SiteConfig
     settle_minutes: PosInt
+    #: `stale_vendor` 在这个 ET 时刻之前只记录不告警（§7.2）。理由见 app.yaml。
+    vendor_deadline_et: time
     lookback_bars: PosInt
     sparkline_bars: PosInt
     sessions_start_date: date

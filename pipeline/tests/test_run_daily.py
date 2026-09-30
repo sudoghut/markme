@@ -53,8 +53,8 @@ class TestExitSemantics:
             ("skipped_too_early", 0),
             ("skipped_already_done", 0),
             # **这一行是最容易写错的那一行。**
-            # 记成非 0 会让 §7.1 的条件重试不跳过 → 夏令时那四跑全部执行
-            # 完整管道 → 18:40 那跑若降级到 Stooq，好数据被更粗的源静默覆盖。
+            # 记成非 0 会让 §7.1 的条件重试不跳过 → 放行的那几跑全部执行
+            # 完整管道 → 其中任一跑若降级到 Stooq，好数据被更粗的源静默覆盖。
             ("ok_events_stale", 0),
             ("stale_vendor", 1),
             ("partial", 1),

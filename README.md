@@ -8,7 +8,8 @@
 
 **架构**：GitHub（代码 + Actions 调度）→ Supabase（Postgres 存储）→ Vercel（Next.js 前端）
 
-> 状态：M0–M7 已实现并对生产库实跑。管道每个交易日收盘后约一小时自动更新。
+> 状态：M0–M7 已实现并对生产库实跑。管道每个交易日收盘后数小时自动更新
+> （数据源当晚才结算完收盘价，见 `config/app.yaml` 的 `settle_minutes`）。
 
 *[English summary below](#english)*
 

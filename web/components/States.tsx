@@ -64,7 +64,7 @@ export function UnavailableNotice({ children }: { children?: React.ReactNode }) 
       </p>
       {children}
       <p className="mt-6 text-xs text-zinc-600">
-        站点每个交易日收盘后约一小时更新一次。若这个提示持续超过一天，说明管道停了。
+        站点每个交易日收盘后数小时更新一次（数据源当晚才结算完收盘价）。若这个提示持续超过一天，说明管道停了。
       </p>
     </main>
   );
