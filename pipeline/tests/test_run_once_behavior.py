@@ -183,6 +183,57 @@ class TestRepairNeverUsesTodaysUnsettledBar:
         assert report.session_date == today
 
 
+class TestStaleVendorOnlyAlertsWhenTheDayIsOut:
+    """**「供应商还没出数」与「供应商坏了」现象一模一样，区分它们的是时刻。**
+
+    实测（M12，2026-09-29）：Yahoo 要到 22:15 ET 前后才结算完收盘价，
+    在那之前给的是半根 bar。而排期里早于它的那几跑**每天**都会撞上
+    「全员落后」——若照旧 exit 1，`daily` 每个交易日都要红好几次，
+    于是 09-29 那天真正的故障淹在噪音里没人看见。
+
+    判据是 ``vendor_deadline_et``（23:00 ET）：之前只记录，之后才告警。
+    那个数**必须 <= 每种情形下「最晚那一跑」的落点**，否则最后一跑也被宽限，
+    就成了静默丢数据 —— 见 `test_schedule_dst.py` 里绑住它的那条。
+    """
+
+    @staticmethod
+    def _lagging_run(harness: Any, at: time) -> Any:
+        _, monkeypatch, rd = harness
+        cfg = load_config()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
+        days = [s.date for s in sessions[:-1]]  # 全员停在 D-1
+        _install_plan(rd, monkeypatch, sessions, _no_revision())
+        monkeypatch.setattr(
+            rd,
+            "fetch_window",
+            lambda *a, **k: FetchOutcome(
+                frame=_frame(symbols, days),
+                per_symbol_source=dict.fromkeys(symbols, "yfinance"),
+            ),
+        )
+        return rd.run_once(FakeConn(), cfg, now=datetime.combine(today, at, tzinfo=ET))
+
+    def test_before_the_deadline_it_records_but_does_not_alert(self, harness: Any) -> None:
+        report = self._lagging_run(harness, time(22, 0))
+        assert report.status == "stale_vendor", "状态照记 —— runs 里的历史必须诚实"
+        assert report.vendor_retry_pending is True
+        assert report.exit_code == 0, "当天还有后续跑，这不是故障"
+        assert "当天仍有后续跑" in report.message
+
+    def test_after_the_deadline_it_alerts(self, harness: Any) -> None:
+        report = self._lagging_run(harness, time(23, 30))
+        assert report.status == "stale_vendor"
+        assert report.vendor_retry_pending is False
+        assert report.exit_code == 1, "当天已无补救机会，必须有人看见"
+        assert "没有补救机会" in report.message
+
+    def test_the_deadline_itself_alerts(self, harness: Any) -> None:
+        """**边界归告警那一侧。** 23:00 整那一跑是当天最后的机会，不该被宽限。"""
+        assert self._lagging_run(harness, time(23, 0)).exit_code == 1
+
+
 class TestEveryoneLaggingWritesNothing:
     """**全员落后**时一个字都不能写。
 

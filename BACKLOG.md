@@ -152,3 +152,19 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   流程文本正在挤占约定文本，值得一次瘦身。
 - **「每轮闸门 A 都要 2–3 个并行 agent」还是「只有首轮要」** —— 文档按字面是前者，
   而 M11 的第 2–8 轮都只派了 1 个。两种读法成本差 3 倍，需要明确一种。
+
+## M12 留下的
+
+- **窗口最左端那 20 天的 metrics 行会被写成全 NULL 覆盖进库**（pre-existing，
+  main 上代码相同，**不是 M12 引入的**）。`run_daily.py` 的
+  `metrics = [r for r in metrics if r["date"] >= write_from]` 在日常跑里
+  `write_from == start`，于是 `_gate` 打 NULL 的那 20 天照样进 `upsert_metrics`，
+  而 `store.py` 的 `_upsert` 是 `set c = excluded.c`（不是 COALESCE）。
+  窗口每天右移，这些天随后永久掉出窗口，**NULL 就留下了**。
+  `invariants.sql` 的名次对账只查 `max(date)`，抓不到它。
+  实测确认：60 session × 17 只 → 最左那天 `mom_20`/`rsi_14`/`ema_60`/`alpha` 全为 None。
+- **`test_calendar_gate.py` 的 `SETTLE = 60`** 是喂给被测函数的参数、不是配置拷贝，
+  所以本轮没动。但它和 `config/app.yaml` 的 330 摆在一起容易被误读，值得重命名。
+- **GitHub cron 的延迟（实测 3–3.6h）是整张落点表的地基，却只有「3 小时」
+  进了测试**（`DELAYS_HOURS = (0, 3)`）。延迟一变，`daily.yml` 的散文、那张表、
+  和 `DELAYS_HOURS` 三者同时失真，而只有第三者会让 CI 红。

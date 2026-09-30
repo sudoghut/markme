@@ -12,14 +12,15 @@
 未到收盘 + settle_minutes     ``skipped_too_early`` 0          否
 本日已有 ok（条件重试跳过）    ``skipped_already_done`` 0       否
 仅事件抓取失败（§3.5(4)）     ``ok_events_stale``   **0**      **否**
-基准 bar 落后                 ``stale_vendor``      1          是
+基准 bar 落后（当天还有后续跑）``stale_vendor``      **0**      **否**
+基准 bar 落后（当天最后一跑） ``stale_vendor``      1          是
 部分标的落后 / 脏数据 / 降级   ``partial``           1          是
 计算 / 写库异常               ``failed``            1          是
 ===========================  ====================  =========  ========
 
 **``ok_events_stale`` 那一行是整张表里最容易写错的。** 把事件抓取失败记成
 ``partial`` 会让 §7.1 的条件重试「本 session 已有 ok 就跳过」**不跳过**，
-于是夏令时那四跑会全部执行完整管道 —— 而 18:40 那跑若撞上限流降级到 Stooq，
+于是放行的那几跑会全部执行完整管道 —— 而其中任一跑若撞上限流降级到 Stooq，
 **好数据会被更粗的源静默覆盖**。一个可选的装饰性指标，就这样获得了
 静默污染核心价格序列的能力。
 """
@@ -88,9 +89,22 @@ class RunReport:
     #: 这一跑实际使用的 session 日期。``main`` 用它把 ``runs`` 那一行对齐。
     session_date: date | None = None
 
+    #: `stale_vendor` 且**当天还有后续跑**。见下面 `exit_code` 与 §7.2。
+    vendor_retry_pending: bool = False
+
     @property
     def exit_code(self) -> int:
-        """§7.2 的退出语义。**只有这一处决定告警不告警。**"""
+        """§7.2 的退出语义。**只有这一处决定告警不告警。**
+
+        唯一的例外写在这里而不是散在别处：``stale_vendor`` 在当天还有后续跑时
+        **不告警**。「供应商还没出数」与「供应商坏了」在闸门看来现象一模一样，
+        区分它们的是**当天还有没有补救机会** —— 实测 Yahoo 要到 22:15 ET
+        前后才结算完收盘价，而排期里早于它的那几跑每天都会撞上这个现象。
+        每天都响的告警等于没有告警（M12）。
+        到 ``vendor_deadline_et`` 之后仍然空手，当天就真的没有了，那才 exit 1。
+        """
+        if self.status == "stale_vendor" and self.vendor_retry_pending:
+            return 0
         return 0 if self.status.startswith(("ok", "skipped")) else 1
 
     def note(self, text: str) -> None:
@@ -191,7 +205,7 @@ def _refresh_events(
 
     **抓取失败不记 partial。** ``partial`` 是 exit 1 且不写 ``ok`` 行，
     于是 §7.1 的条件重试「本 session 已有 ok 就跳过」不会跳过 ——
-    夏令时那四跑会全部执行完整管道，而 18:40 那跑若撞上限流降级到 Stooq，
+    放行的那几跑会全部执行完整管道，而其中任一跑若撞上限流降级到 Stooq，
     **好数据会被更粗的源静默覆盖**。一个可选的装饰性指标，
     就这样获得了静默污染核心价格序列的能力。
     """
@@ -340,11 +354,9 @@ def _structural_blanks(sessions: Sequence[Session], start: date, cfg: Config) ->
     它每一跑都存在，而且随窗口右移每天换一批日期。
 
     **为什么要把它和真正的失败分开**：无差别 ``escalate("partial")`` 会让
-    ``daily`` 每天都红（实测 2026-09-24 起连续多日，每跑都带着
-    「20 天算不出横截面」）。而 ``invariants.sql`` 里写了三遍的那条原则是
-    「长期飘红的断言会把整套补偿策略训练成『反正它总是红的』」——
-    一个永远在响的告警，和没有告警是同一件东西。2026-09-29 那天
-    `stale_vendor` 真的响了，却淹在这片噪音里没人看见。
+    ``daily`` **每一次成功的跑也 exit 1**，于是告警永远是红的 ——
+    而 ``invariants.sql`` 里写了三遍的那条原则正是「长期飘红的断言会把
+    整套补偿策略训练成『反正它总是红的』」。事故经过见 ``docs/reviews/M12.md``。
 
     返回 ``None`` = **说不准**（排序分不是 metrics.yaml 里的指标，例如
     ``composite``；或它没声明 ``min_bars``）。此时不认领任何一天是结构性的，
@@ -432,12 +444,12 @@ def run_once(
         # 走到这里只剩一种可能：闸门说了不跑，而 revision.needs_repair 把它顶开了。
         # 而 `when_to_run` 在 skipped_too_early 分支里返回的 gate.session 是**今天** ——
         # 于是一次自动触发的修复会去抓一根**还没过 settle_minutes** 的今日 bar：
-        # 16:00 ET 那条 cron 上就是敲钟那一刻的价，workflow_dispatch 上可以是盘中价。
+        # 16:00 ET（手动 dispatch 拿得到的最早时刻）上就是敲钟那一刻的价，盘中更糟。
         #
         # 闸门 3 拦不住（日期就是今天，`stale_symbols` 比的正是日期相等），
         # 闸门 4 也拦不住（preliminary 与 consolidated 的差是千分位，
         # 离 _MAX_DAILY_MOVE / _CROSS_SOURCE_TOLERANCE 十万八千里）。
-        # 写进去的就是 daily.yml 文件头那句「宁可晚一小时，不要一个会变的数字」
+        # 写进去的就是 daily.yml 文件头那句「宁可晚几小时，不要一个会变的数字」
         # 要防的东西，而且整窗 strength 都由它导出。
         #
         # 修复要的只是历史窗口，根本不需要今天那根 —— 钳到上一个已定稿的 session。
@@ -569,9 +581,18 @@ def run_once(
         #
         # 判据从 `prices.empty` 换成「是不是全员落后」—— 那才是这一半的本名。
         report.escalate("stale_vendor")
+        # 当天还有后续跑时不告警 —— 判据是**时刻**不是跑次序号：
+        # 后者要把 cron 抄进管道，而 cron 会变，抄两份必然漂移。
+        deadline = cfg.app.vendor_deadline_et
+        report.vendor_retry_pending = now.astimezone(ET).time() < deadline
         report.note(
             f"全部 {len(symbols)} 只标的的最新 bar 都落后于 {session.date}，"
             "跳过写入（不动已有数据）"
+            + (
+                f"；还没到 {deadline:%H:%M} ET，当天仍有后续跑，不告警"
+                if report.vendor_retry_pending
+                else f"；已过 {deadline:%H:%M} ET，当天没有补救机会了"
+            )
         )
         conn.rollback()
         return report
@@ -718,8 +739,7 @@ def run_once(
                 continue
             replace_strength(conn, day, rows)
         if blanked:
-            # **只有意外的那部分才该告警。** 窗口最左端那一段是定义使然，
-            # 见 `_structural_blank_until`。
+            # **只有意外的那部分才该告警**（见 `_structural_blanks`）。
             warm = _structural_blanks(sessions, start, cfg)
             structural = [d for d in blanked if warm is not None and d in warm]
             unexpected = [d for d in blanked if warm is None or d not in warm]

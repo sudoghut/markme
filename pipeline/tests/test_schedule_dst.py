@@ -135,26 +135,38 @@ class TestTheNetEffect:
         assert passing >= 2, f"{zone} 延迟{delay}h 只有 {passing} 跑放行"
 
     @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
-    def test_no_passing_run_ever_crosses_midnight_et(self, zone: str, delay: int) -> None:
-        """**放行的那几跑必须落在会话当天的 ET 日期上。**
+    def test_a_run_past_midnight_et_no_longer_belongs_to_that_session(
+        self, zone: str, delay: int
+    ) -> None:
+        """跨过午夜 ET 的那几跑，``when_to_run`` 会把它们判给**第二天**。
 
-        这条是 2026-09-30 新加的。跨过午夜 ET 之后 ``when_to_run`` 会挑到
-        第二天那一场，判 ``skipped_too_early`` —— exit 0、不告警、
-        当天数据**永久丢失**。比「太早」坏，因为太早还会被后面几跑救回来。
+        这是比「太早」更坏的一种失败：太早会被当天后面几跑救回来，
+        跨午夜不会 —— 判 ``skipped_too_early`` / ``skipped_holiday``，
+        exit 0、不告警、当天数据**永久丢失**。
+
+        断的是闸门自己的行为（``_decide`` 的原始判定），不是
+        ``_ran_for_that_session`` —— 后者已经把「会话必须等于当天」
+        写进了定义，拿它来断这条是恒真的，抓不到任何回归。
         """
         day = DAYS[zone]
         for cron in CRONS:
-            if not _ran_for_that_session(day, cron, delay):
+            fired_et = _fired_at(day, cron, delay).astimezone(ET)
+            if fired_et.date() == day:
                 continue
-            assert _fired_at(day, cron, delay).astimezone(ET).date() == day
+            decision = _decide(day, cron, delay)
+            assert decision.session is None or decision.session.date != day, (
+                f"{fired_et:%m-%d %H:%M} ET 已过午夜，不该还被判给 {day} 那一场"
+            )
 
     @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
-    def test_every_passing_run_is_after_the_vendor_settles(self, zone: str, delay: int) -> None:
+    def test_every_passing_run_is_after_the_gate_opens(self, zone: str, delay: int) -> None:
         """放行的跑都在 21:30 ET 之后 —— 也就是闸门 2 的开门时刻。
 
-        实测的可用时刻在 21:19–22:15 ET 之间（2026-09-29，见 app.yaml）。
-        这条把「放行」和「供应商大概率已经结算」绑在一起：
-        在它之前放行，拿到的是半根 bar，然后记一条毫无意义的 `stale_vendor`。
+        **注意这条断的不是「供应商已经结算」。** 实测结算在 22:15 ET 前后，
+        而 3h 延迟下每天第一跑恰好落在 22:00 —— 早 15 分钟。
+        那个缺口不是靠排期堵的（一个观测点撑不起 15 分钟的精度），
+        是靠 ``vendor_deadline_et`` 的退出语义堵的：早到的那一跑照记
+        ``stale_vendor`` 但不告警。见下面那条绑住截止时刻的测试。
         """
         day = DAYS[zone]
         for cron in CRONS:
@@ -162,6 +174,39 @@ class TestTheNetEffect:
                 continue
             fired = _fired_at(day, cron, delay).astimezone(ET)
             assert (fired.hour, fired.minute) >= (21, 30), f"{fired:%H:%M} ET 早于闸门 2"
+
+
+class TestTheVendorDeadlineHasSomethingToLandOn:
+    """``vendor_deadline_et`` 必须 **<= 每种情形下「最晚那一跑」的落点**。
+
+    否则当天**没有任何一跑**会走到告警那一侧 —— 供应商整天不出数也悄无声息，
+    那比「每天都红」坏得多。这条把 `config/app.yaml` 的那个时刻与
+    `daily.yml` 的那七条 cron 绑在一起：动任何一边都要重算。
+    """
+
+    @staticmethod
+    def _deadline() -> time:
+        cfg = yaml.safe_load(
+            (WORKFLOWS.parent.parent / "config" / "app.yaml").read_text(encoding="utf-8")
+        )
+        raw = cfg["vendor_deadline_et"]
+        hh, mm = str(raw).split(":")[:2]
+        return time(int(hh), int(mm))
+
+    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
+    def test_some_run_lands_at_or_after_the_deadline(self, zone: str, delay: int) -> None:
+        day = DAYS[zone]
+        passing = [
+            _fired_at(day, c, delay).astimezone(ET)
+            for c in CRONS
+            if _ran_for_that_session(day, c, delay)
+        ]
+        assert passing, "这一格一跑都没有，另有测试管"
+        latest = max(passing)
+        assert (latest.hour, latest.minute) >= (self._deadline().hour, self._deadline().minute), (
+            f"{zone} 延迟{delay}h 最晚只跑到 {latest:%H:%M} ET，"
+            f"早于截止 {self._deadline():%H:%M} —— 当天将永远不会告警"
+        )
 
 
 class TestHalfDays:
@@ -223,4 +268,52 @@ class TestTheWorkflowFileActuallyHasThoseCrons:
         数据会完整回滚（那没问题），但 ``runs`` 里会留下一行永远停在
         running，而那是留给「硬崩溃」的信号。
         """
-        assert self._daily()["concurrency"]["cancel-in-progress"] is False
+        cfg = self._daily()
+        assert cfg["concurrency"]["cancel-in-progress"] is False
+        assert cfg["concurrency"]["group"] == "markme-daily"
+
+    def test_backfill_shares_the_concurrency_group(self) -> None:
+        """回填与日常运行写同一批表，不能并发。"""
+        cfg: dict[str, Any] = yaml.safe_load(
+            (WORKFLOWS / "backfill.yml").read_text(encoding="utf-8")
+        )
+        assert cfg["concurrency"]["group"] == "markme-daily"
+
+    def test_backfill_is_dispatch_only(self) -> None:
+        """§7.4：``backfill.yml`` 只能手动触发。一条 schedule 都不该有。"""
+        text = (WORKFLOWS / "backfill.yml").read_text(encoding="utf-8")
+        assert "schedule:" not in text
+
+    def test_the_secret_is_scoped_to_the_step(self) -> None:
+        """§8.3：secret 挂 step 级而非 job/workflow 级 ——
+        checkout 与 uv sync 都不需要它。"""
+        text = (WORKFLOWS / "daily.yml").read_text(encoding="utf-8")
+        head = text[: text.index("MARKME_DB_URL")]
+        assert head.count("env:") <= 1, "MARKME_DB_URL 之前不该有 job 级 env"
+
+
+class TestKeepaliveCoversTheWeekend:
+    """§8.6：Supabase 的暂停计时**不认交易日**。"""
+
+    def test_it_runs_every_day(self) -> None:
+        text = (WORKFLOWS / "keepalive.yml").read_text(encoding="utf-8")
+        assert re.search(r"cron:\s*'[\d ]+\* \* \*'", text), "必须含周末"
+
+    def test_it_runs_the_invariants_not_just_a_select_one(self) -> None:
+        """§12 #9 第 3 条：不变式断的是**线上数据库状态**，不是代码，
+        所以不能只挂在 push 触发的 ci.yml 上。"""
+        text = (WORKFLOWS / "keepalive.yml").read_text(encoding="utf-8")
+        assert "pipeline.check_invariants" in text
+        assert "test_db_integration.py" in text
+
+
+class TestHeartbeatResetsTheCronTimer:
+    def test_it_makes_a_commit_monthly(self) -> None:
+        """**GitHub 在仓库 60 天无活动后自动停用 schedule 触发器**，
+        而 workflow 的「运行」不算活动 —— 提交才算。
+        这个项目的稳态恰恰是「跑得很好、没人再推代码」。"""
+        text = (WORKFLOWS / "heartbeat.yml").read_text(encoding="utf-8")
+        cfg: dict[str, Any] = yaml.safe_load(text)
+        assert cfg["permissions"]["contents"] == "write"
+        assert "git commit" in text
+        assert re.search(r"cron:\s*'[\d ]+1 \* \*'", text), "每月一次"
