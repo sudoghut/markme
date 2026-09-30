@@ -65,7 +65,7 @@ class TestGateOneAndTwo:
     def test_a_half_day_gate_adapts_automatically(self) -> None:
         """半日市 13:00 收盘则闸门 14:00 ET 放行，规则自动适配。
 
-        写死 16:00 会让半日市当天晚 3 小时 —— 而管道 17:00 才跑，
+        写死 16:00 会让半日市当天晚 3 小时 —— 而管道要更晚才跑，
         所以这个错误在生产上**永远不会表现出来**，只会在某次改动之后
         突然变成「半日市当天没数据」。
         """
@@ -113,7 +113,7 @@ class TestDaylightSaving:
         assert when_to_run(sessions, now, SETTLE).should_run is expect_run
 
     def test_the_gate_is_computed_in_wall_clock_not_utc_offset(self) -> None:
-        """两个季节的闸门都是 17:00 **ET 墙上时间**，UTC 偏移自己会变。"""
+        """两个季节的闸门都是同一个 **ET 墙上时间**，UTC 偏移自己会变。"""
         summer = gate_opens_at(_s("2024-06-12"), SETTLE)
         winter = gate_opens_at(_s("2024-12-11"), SETTLE)
         assert summer.hour == winter.hour == 17
@@ -238,7 +238,7 @@ class TestLastSettledSession:
         assert got.date == date(2024, 6, 12)
 
     def test_half_day_settles_early(self) -> None:
-        """半日市 13:00 收盘 → 14:00 就定稿了，不必等到 17:00。"""
+        """半日市 13:00 收盘 → 闸门按同一条规则自适应，不必等到全日市那个点。"""
         got = last_settled_session(self.SESSIONS, _et("2024-07-03", 14, 1), SETTLE)
         assert got.date == date(2024, 7, 3)
 

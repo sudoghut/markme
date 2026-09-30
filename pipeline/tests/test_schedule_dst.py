@@ -66,7 +66,7 @@ def _session(d: date, ordinal: int = 1, *, half: bool = False) -> Session:
     return Session(date=d, ordinal=ordinal, close_et=close, is_half_day=half)
 
 
-def _fired_at(day: date, cron: tuple[int, int, int], delay_h: int) -> datetime:
+def _fired_at(day: date, cron: tuple[int, int, int], delay_h: float) -> datetime:
     """这条 cron 为 ``day`` 那一场实际在什么时刻执行（UTC）。"""
     hh, mm, day_off = cron
     return datetime.combine(day + timedelta(days=day_off), time(hh, mm), tzinfo=UTC) + timedelta(
@@ -75,7 +75,7 @@ def _fired_at(day: date, cron: tuple[int, int, int], delay_h: int) -> datetime:
 
 
 def _decide(
-    day: date, cron: tuple[int, int, int], delay_h: int, *, half: bool = False
+    day: date, cron: tuple[int, int, int], delay_h: float, *, half: bool = False
 ) -> GateDecision:
     """把**当天和次日两场**都喂进去 —— 生产里 sessions 是全量的。
 
@@ -87,7 +87,7 @@ def _decide(
 
 
 def _ran_for_that_session(
-    day: date, cron: tuple[int, int, int], delay_h: int, *, half: bool = False
+    day: date, cron: tuple[int, int, int], delay_h: float, *, half: bool = False
 ) -> bool:
     """**放行，且放行的是 ``day`` 那一场。** 两个条件缺一不可。"""
     d = _decide(day, cron, delay_h, half=half)
@@ -193,20 +193,36 @@ class TestTheVendorDeadlineHasSomethingToLandOn:
         hh, mm = str(raw).split(":")[:2]
         return time(int(hh), int(mm))
 
-    @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
-    def test_some_run_lands_at_or_after_the_deadline(self, zone: str, delay: int) -> None:
-        day = DAYS[zone]
-        passing = [
-            _fired_at(day, c, delay).astimezone(ET)
-            for c in CRONS
-            if _ran_for_that_session(day, c, delay)
-        ]
-        assert passing, "这一格一跑都没有，另有测试管"
-        latest = max(passing)
-        assert (latest.hour, latest.minute) >= (self._deadline().hour, self._deadline().minute), (
-            f"{zone} 延迟{delay}h 最晚只跑到 {latest:%H:%M} ET，"
-            f"早于截止 {self._deadline():%H:%M} —— 当天将永远不会告警"
-        )
+    #: 延迟按 **15 分钟粒度**扫 0–4h。整点粒度会漏：初稿的截止时刻定在 23:00，
+    #: 就是因为只扫了 {0,1,2,3,3.6h} 就当成了穷尽 —— 细化之后发现 0.5h / 1.5h
+    #: 延迟下有一整年的格子一跑都不会告警。**粗网格上的最小值不是最小值。**
+    FINE_DELAYS = tuple(i / 4 for i in range(17))
+
+    @pytest.mark.parametrize("zone", list(DAYS))
+    def test_some_run_lands_at_or_after_the_deadline(self, zone: str) -> None:
+        day, deadline = DAYS[zone], self._deadline()
+        for delay in self.FINE_DELAYS:
+            passing = [
+                _fired_at(day, c, delay).astimezone(ET)
+                for c in CRONS
+                if _ran_for_that_session(day, c, delay)
+            ]
+            assert passing, f"{zone} 延迟{delay}h 一跑都没有"
+            latest = max(passing)
+            assert (latest.hour, latest.minute) >= (deadline.hour, deadline.minute), (
+                f"{zone} 延迟{delay}h 最晚只跑到 {latest:%H:%M} ET，"
+                f"早于截止 {deadline:%H:%M} —— 当天将永远不会告警（静默丢数据）"
+            )
+
+    @pytest.mark.parametrize("zone", list(DAYS))
+    def test_the_deadline_is_still_after_the_vendor_usually_settles(self, zone: str) -> None:
+        """截止时刻还得**晚于实测的结算时刻**，否则最后一跑又变成天天误报。
+
+        两头夹出来的区间：`>= 22:15`（实测结算）且 `<= 22:30`（最晚放行的下界）。
+        这个区间只有 15 分钟宽 —— 动 cron 之前先看一眼它还在不在。
+        """
+        deadline = self._deadline()
+        assert (deadline.hour, deadline.minute) >= (22, 15), "早于实测结算时刻会天天误报"
 
 
 class TestHalfDays:
