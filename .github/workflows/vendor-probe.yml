@@ -1,0 +1,69 @@
+name: vendor-probe
+
+# **临时诊断工具，用完就删。** 不是管道的一部分。
+#
+# 它要回答的问题只有一个：**Yahoo 的日线 bar 到底什么时候定稿？**
+#
+# M12 把两个生产阈值（`settle_minutes: 330` 与 `vendor_deadline_et: 22:30`）
+# 建立在**一天的两个观测点**上（2026-09-29 的 21:05 ET 半根 / 22:09 ET 完整），
+# 而这两个数之间只有 15 分钟余量。M11 与 M12 反复栽的正是
+# 「把一条局部观察升格成通用判据」—— 这个探针把它换成有分布支撑的数。
+#
+# **它只读。** 不带任何数据库凭据，不连库、不写任何表。
+# `test_vendor_probe.py` 把这一条钉住了：一旦文件里出现数据库 secret 的名字，CI 会红。
+#
+# **为什么是四条错开的 cron，而不是一条长任务。**
+# GitHub 会把 schedule 延后 3 小时以上（M12 实测），一条长任务的起点因此不可控。
+# 四条错开、每条自采 8 次（间隔 15 分钟，覆盖 2 小时），无论迟到多少，
+# 合起来都能盖住傍晚那一整段。**记录的是真实墙上时刻，不是 cron 的预定时刻。**
+#
+# 跑够两周后：算「17 只全部结算完」的时刻分布 → 重定那两个阈值 →
+# 删掉本文件、`pipeline/vendor_probe.py`、`pipeline/tests/test_vendor_probe.py`
+# 与 `docs/probe/`。BACKLOG 里有这条待办。
+on:
+  schedule:
+    - cron: "30 20 * * 1-5" # EDT 16:30 ET（收盘后半小时）/ EST 15:30（盘中，照样采）
+    - cron: "30 22 * * 1-5" # EDT 18:30 / EST 17:30
+    - cron: "30 0 * * 2-6" # EDT 20:30（前一日）/ EST 19:30
+    - cron: "30 2 * * 2-6" # EDT 22:30 / EST 21:30
+  workflow_dispatch:
+
+permissions:
+  contents: write # 只为把采样结果提交回仓库
+
+concurrency:
+  # **不能和 markme-daily 同组** —— 探针一跑近两小时，同组会把管道堵在后面。
+  group: markme-vendor-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150 # 8 次 × 15 分钟 = 约 1h45m，留裕量
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: 采样
+        run: uv run python -m pipeline.vendor_probe
+      - name: 提交采样结果
+        run: |
+          if [ -z "$(git status --porcelain docs/probe)" ]; then
+            echo "没有新数据（非交易日或全部采样失败），不提交"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/probe
+          git commit -m "chore(probe): 供应商结算时刻采样 $(date -u +%Y-%m-%dT%H:%MZ)"
+          # 四条 cron 可能因为延迟而重叠；concurrency 已经排队，
+          # 但仍可能与 heartbeat/dependabot 的提交撞上，所以 rebase 后重试。
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            sleep $((i * 5))
+          done
+          echo "推送失败三次，放弃（采样数据会在下一跑一并带上）"
+          exit 1

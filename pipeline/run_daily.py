@@ -116,8 +116,21 @@ class RunReport:
         散在各处的 ``report.status = ...`` 很容易互相覆盖 ——
         一个 partial 被后面一句写回 ok，或者反过来把 stale_vendor 降成 partial。
         统一走这里。
+
+        **``partial`` 排在 ``stale_vendor`` 之上，这一条是 M12 用一个 bug 换来的。**
+        两者曾经同为 rank 2（那时无所谓：都 exit 1）。M12 让 ``stale_vendor``
+        在截止时刻之前 exit 0 之后，同 rank 就变成了一个**静音器**：
+        「基准落后」那一支不 return、会继续往下走，一旦它先把状态锁成
+        ``stale_vendor``，下游三处 ``escalate("partial")``（窗口内有空洞 /
+        事件预算耗尽 / 非预热区算不出横截面）全部变成空操作，
+        **而那一跑照样写库、照样 revalidate 把结果推上线**。
+        于是 §7.2 表里「partial → exit 1 → 告警」那一行，在每天都会出现的
+        「基准还没结算完」状态下被整体撤销。
+
+        语义上也该如此：``stale_vendor`` 可能是良性的（在等供应商），
+        ``partial`` 从来不是。两者同时成立时，**该响的是 partial**。
         """
-        rank = {"ok": 0, "ok_events_stale": 1, "partial": 2, "stale_vendor": 2, "failed": 3}
+        rank = {"ok": 0, "ok_events_stale": 1, "stale_vendor": 2, "partial": 3, "failed": 4}
         if rank.get(status, 0) > rank.get(self.status, 0):
             self.status = status
 
@@ -598,7 +611,7 @@ def run_once(
         report.vendor_retry_pending = vendor_grace
         report.note(
             f"全部 {len(symbols)} 只标的的最新 bar 都落后于 {session.date}，"
-            "跳过写入（不动已有数据）" + _grace_note(cfg, vendor_grace)
+            "跳过写入（不动已有数据）" + _grace_note(cfg, report.vendor_retry_pending)
         )
         conn.rollback()
         return report
@@ -608,13 +621,16 @@ def run_once(
         report.escalate("stale_vendor" if bench in lagging else "partial")
         if bench in lagging:
             # **这一支同样要宽限。** 结算不是 17 只同时翻的：
-            # `fetch.py` 丢掉 `adj_close` 为 NaN 的半根 bar，于是「14 只已结算、
+            # `fetch.py` 丢掉 `adj_close` 为 NaN 的半根 bar，于是「16 只已结算、
             # 基准还没有」是结算过程中最正常的中间态。不装宽限的话，
             # M12 要消灭的那种每天都响的噪音会从这一支原样漏回来。
             report.vendor_retry_pending = vendor_grace
+        # **消息和退出码必须出自同一个布尔值。** 各写各的条件，变异测试里
+        # 当场出现过「日志写着不告警、exit_code 却是 1」——
+        # 一条说反的日志比没有日志更费事。
         report.note(
             f"bar 落后：{', '.join(lagging)}"
-            + (_grace_note(cfg, vendor_grace) if bench in lagging else "")
+            + (_grace_note(cfg, report.vendor_retry_pending) if bench in lagging else "")
         )
         # **只是尾部缺了一根，不是整窗都不可信 —— 所以这里什么都不丢。**
         #

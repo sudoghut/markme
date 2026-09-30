@@ -163,10 +163,28 @@ class TestStatusEscalation:
         r.escalate("ok")
         assert r.status == "ok" and r.exit_code == 0
 
-    def test_stale_vendor_is_not_downgraded_to_partial(self) -> None:
+    def test_partial_overrides_a_graced_stale_vendor(self) -> None:
+        """**M12 用一个 bug 换来的那条 rank。**
+
+        `partial` 与 `stale_vendor` 曾经同为 rank 2 —— 那时无所谓，都 exit 1。
+        M12 让 `stale_vendor` 在截止时刻之前 exit 0 之后，同 rank 变成了
+        **静音器**：「基准落后」那一支不 return、会继续往下走，一旦它先把状态
+        锁成 `stale_vendor`，下游三处 `escalate("partial")`（窗口内有空洞 /
+        事件预算耗尽 / 非预热区算不出横截面）全部变成空操作，
+        **而那一跑照样写库、照样把结果推上线**。
+        """
         r = RunReport(status="stale_vendor")
+        r.vendor_retry_pending = True
+        assert r.exit_code == 0, "宽限中，本来不告警"
         r.escalate("partial")
-        assert r.status == "stale_vendor", "同级不互相覆盖，消息都留在 messages 里"
+        assert r.status == "partial"
+        assert r.exit_code == 1, "partial 从来不是良性的 —— 它必须盖掉宽限"
+
+    def test_a_graced_stale_vendor_is_not_downgraded_by_a_healthier_status(self) -> None:
+        r = RunReport(status="stale_vendor")
+        r.vendor_retry_pending = True
+        r.escalate("ok_events_stale")
+        assert r.status == "stale_vendor" and r.exit_code == 0
 
 
 class TestRevalidation:
