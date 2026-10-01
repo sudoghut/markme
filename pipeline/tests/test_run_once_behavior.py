@@ -111,7 +111,7 @@ def _install_plan(
 class TestRepairNeverUsesTodaysUnsettledBar:
     """闸门 2 被 ``needs_repair`` 顶开时，**不能**拿今天那根还没定稿的 bar。
 
-    16:00 ET 正好是敲钟那一刻，``settle_minutes``（330）一分钟都没过。
+    16:00 ET 正好是敲钟那一刻，``settle_minutes``（60）一分钟都没过。
     闸门 3 比的是日期相等（今天，通过），闸门 4 的阈值是 50% 日内波动
     与 2% 跨源差（preliminary 与 consolidated 的差是千分位，通过）——
     两道后闸门都拦不住，写进去的就是一个**会变的数字**。
