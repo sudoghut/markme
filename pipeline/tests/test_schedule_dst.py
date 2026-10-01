@@ -276,7 +276,7 @@ class TestTheFinalizeCrons:
 
 
 class TestHalfDays:
-    """半日市 13:00 收盘 → 18:30 ET 放行，比全日市早三小时。"""
+    """半日市 13:00 收盘 → 14:00 ET 放行（临时结果），比全日市早三小时。"""
 
     @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
     def test_half_day_also_has_at_least_two_passing_runs(self, zone: str, delay: int) -> None:
@@ -296,7 +296,7 @@ class TestHalfDays:
 class TestTheWorkflowFileActuallyHasThoseCrons:
     """**光测逻辑不够** —— 逻辑对而 cron 写错，效果一样是当天零数据。
 
-    这条把 ``daily.yml`` 里那七行与上面的矩阵绑在一起：
+    这条把 ``daily.yml`` 里那八条晚间 cron 与上面的矩阵绑在一起：
     改了 cron 而没改测试，或反过来，都会红。
     """
 
