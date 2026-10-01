@@ -196,5 +196,6 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   `run_daily.py` 里 `session = gate.session or last_settled_session(...)` —— 而
   `skipped_too_early` 分支返回的 `gate.session` 就是今天。于是「早上手动补昨天」
   只会再报一次 `stale_vendor`、什么都不写。修复跑那一支已经钳到上一个已定稿的
-  session，这一支没有。**另开分支修。**
+  session，这一支没有。**另开分支修。** 修时顺带把 `vendor_grace` 限定为
+  `session.date == 当天 ET` —— 否则 force 拿到错 session 时，截止前的落后也会被宽限（第 6 轮）。
 - 两个 `checkout` 都没设 `persist-credentials: false`（token 只读，风险低，与其余 workflow 一致）。
