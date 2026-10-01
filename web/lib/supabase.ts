@@ -62,4 +62,11 @@ export type StrengthRow = {
 };
 
 export type SymbolRow = { symbol: string; name: string; type: string; enabled: boolean };
-export type PriceRow = { symbol: string; date: string; close: number | null; adj_close: number };
+export type PriceRow = {
+  symbol: string;
+  date: string;
+  close: number | null;
+  adj_close: number;
+  /** 收盘后先出的临时值（分钟线拼出来的收盘价），定稿后为 false。见 docs/provisional-close.md。 */
+  preliminary: boolean;
+};

@@ -14,12 +14,10 @@ grep 抓不到「session 取错了哪一天」，也抓不到「replace_strength
 
 from __future__ import annotations
 
-import contextlib
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import pandas as pd
-import pytest
 
 from pipeline.calendar_gate import ET
 from pipeline.config import load_config
@@ -86,8 +84,12 @@ def _frame(symbols: list[str], days: list[date], *, price: float = 100.0) -> pd.
                 {
                     "symbol": s,
                     "date": d,
+                    "open": float("nan"),
+                    "high": float("nan"),
+                    "low": float("nan"),
                     "close": price + i * 0.1,
                     "adj_close": price + i * 0.1,
+                    "volume": float("nan"),
                     "source": "yfinance",
                 }
             )
@@ -98,37 +100,6 @@ def _no_revision() -> CalendarRevision:
     return CalendarRevision(
         added_future=(), removed_future=(), added_historical=(), removed_historical=()
     )
-
-
-@pytest.fixture
-def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """把 ``run_once`` 的所有 I/O 换成可观测的假货。"""
-    from pipeline import run_daily as rd
-
-    calls: dict[str, list[Any]] = {"replace_strength": [], "upsert_metrics": [], "revalidate": []}
-
-    monkeypatch.setattr(rd, "write_sessions", lambda *a, **k: None)
-    monkeypatch.setattr(rd, "write_symbols", lambda *a, **k: None)
-    monkeypatch.setattr(rd, "upsert_prices", lambda conn, rows: len(rows))
-    monkeypatch.setattr(rd, "touch_fetch_state", lambda *a, **k: None)
-    monkeypatch.setattr(rd, "revalidate_site", lambda r: calls["revalidate"].append(r))
-    monkeypatch.setattr(rd, "_existing_prices", lambda *a, **k: {})
-    monkeypatch.setattr(rd, "_already_done", lambda *a, **k: False)
-    monkeypatch.setattr(rd, "_carried_scores", lambda *a, **k: [])
-    monkeypatch.setattr(rd, "_refresh_events", lambda *a, **k: ({}, True))
-    monkeypatch.setattr(rd, "data_transaction", lambda conn: contextlib.nullcontext(conn))
-
-    def _upsert_metrics(conn: Any, rows: list[dict[str, Any]]) -> int:
-        calls["upsert_metrics"].append(rows)
-        return len(rows)
-
-    def _replace_strength(conn: Any, day: date, rows: list[dict[str, Any]]) -> int:
-        calls["replace_strength"].append((day, rows))
-        return len(rows)
-
-    monkeypatch.setattr(rd, "upsert_metrics", _upsert_metrics)
-    monkeypatch.setattr(rd, "replace_strength", _replace_strength)
-    return calls, monkeypatch, rd
 
 
 def _install_plan(
@@ -241,7 +212,7 @@ class TestOnlyTheBenchmarkLaggingAlsoGetsTheGrace:
     基准 QQQ 还没有」是结算过程中最正常的中间态 —— 它走的是
     `if lagging:` 里 `bench in lagging` 那一支，和「全员落后」不是同一段代码。
 
-    第一版只给「全员落后」那一支装了宽限，而 §7.2 的表里写的恰恰是
+    第一版只给「全员落后」那一支装了宽限，而当时 §7.2 的表里写的恰恰是
     「**基准** bar 落后（当天还有后续跑）→ exit 0」。表和实现对不上，
     M12 要消灭的噪音会从这一支原样漏回来。
     """

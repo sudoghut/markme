@@ -8,8 +8,9 @@
 
 **架构**：GitHub（代码 + Actions 调度）→ Supabase（Postgres 存储）→ Vercel（Next.js 前端）
 
-> 状态：M0–M7 已实现并对生产库实跑。管道每个交易日收盘后数小时自动更新
-> （数据源当晚才结算完收盘价，见 `config/app.yaml` 的 `settle_minutes`）。
+> 状态：M0–M7 已实现并对生产库实跑。管道每个交易日收盘约一小时后先出**临时**结果
+> （收盘价取自分钟线，页面右上角会标明），当晚或次日换成正式收盘价；
+> 前一天及更早的数据都是定稿（见 [`docs/provisional-close.md`](docs/provisional-close.md)）。
 
 *[English summary below](#english)*
 
@@ -66,6 +67,7 @@ uv run python -m pipeline.check_invariants   # 线上数据库的 19 条不变�
 | 文档 | 说明 | 状态 | 更新 |
 |---|---|---|---|
 | [create-project.md](docs/create-project.md) | 项目建设计划 | v3 + 实现期按实测修正 | 2026-09-21 |
+| [provisional-close.md](docs/provisional-close.md) | 收盘后先出临时结果、次日定稿（M13） | 已确认，实现中 | 2026-10-01 |
 
 ## 为什么站点有一道密码
 
@@ -127,8 +129,9 @@ M0–M8 一共抓到 **45 条 SERIOUS**，逐条记在 `docs/reviews/`。
 ## English
 
 **markme** (market metrics) is a read-only US-equity indicator dashboard that
-updates automatically a few hours after each market close (the data vendor
-only finalises the daily bar around 22:00 ET).
+publishes a preliminary result about an hour after each market close (the close
+taken from the last 1-minute bar, flagged on the page) and replaces it with the
+official close that night or the next morning; history is always final.
 
 It tracks QQQ plus 16 Nasdaq stocks (17 symbols) and computes **RSI(14)**,
 **EMA(60)**, **half-year alpha & beta against QQQ**, and **days to/since the next

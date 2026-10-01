@@ -1,6 +1,7 @@
 """供应商结算时刻探针（**临时诊断工具，不是管道的一部分**）。
 
-M12 把两个生产阈值（``settle_minutes: 330`` 与 ``vendor_deadline_et: 22:30``）
+M12 把两个生产阈值（当时的 ``settle_minutes: 330``，M13 起叫 ``final_settle_minutes``；
+与 ``vendor_deadline_et: 22:30``）
 建立在**一天的两个观测点**上：2026-09-29 的 21:05 ET 拿到半根 bar、22:09 ET
 拿到完整的。两者之间只有 15 分钟余量，而 M11/M12 反复栽的正是
 「把一条局部观察升格成通用判据」。这个探针把那两个数换成有分布支撑的数。
@@ -18,7 +19,7 @@ M12 把两个生产阈值（``settle_minutes: 330`` 与 ``vendor_deadline_et: 22
 而不是 cron 的预定时刻 —— GitHub 会迟到 3 小时以上，预定时刻没有意义。
 
 跑够两周之后：算出「17 只全部结算完」的时刻分布，用它重定
-``settle_minutes`` 与 ``vendor_deadline_et``，然后**删掉这个文件与那个工作流**。
+``final_settle_minutes`` 与 ``vendor_deadline_et``，然后**删掉这个文件与那个工作流**。
 """
 
 from __future__ import annotations

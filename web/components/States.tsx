@@ -47,6 +47,28 @@ export function StaleBanner({
 }
 
 /**
+ * **盘后临时数据**的提示（docs/provisional-close.md）。挂在页首右上角「数据截至 …」下面。
+ *
+ * 收盘约一小时后，当天的收盘价取自 15:59 那根分钟线 —— 与正式收盘价差在 16:00 那笔
+ * 收盘竞价，实测通常是千分之几以内。它是「先给一个大致的结果」，不是定稿，所以必须标出来：
+ * 一个会变的数字只有在被标明会变时才是诚实的。
+ *
+ * 只看最新那一天：按不变式，历史行全是定稿（`invariants.sql`「历史价格行不得是临时值」）。
+ * 文案里**不写误差数字** —— 那是实测范围，不是保证。
+ */
+export function PreliminaryBadge({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <span
+      className="ml-2 inline-block rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[11px] text-accent"
+      title="当天收盘价取自收盘前最后一根分钟线，正式收盘价将于当晚或次日更新；指标与排名随之修正。"
+    >
+      盘后临时数据 · 正式收盘价待更新
+    </span>
+  );
+}
+
+/**
  * 「数据暂不可用」的正文。没有 hook、没有事件，所以**服务端和客户端都能渲染** ——
  * 构建期走 `page.tsx` 的兜底，运行期走 `error.tsx`，两条路只有一份文案。
  */
@@ -64,7 +86,7 @@ export function UnavailableNotice({ children }: { children?: React.ReactNode }) 
       </p>
       {children}
       <p className="mt-6 text-xs text-zinc-600">
-        站点每个交易日收盘后数小时更新一次（数据源当晚才结算完收盘价）。若这个提示持续超过一天，说明管道停了。
+        站点每个交易日收盘约一小时后先出临时结果，当晚或次日换成正式收盘价。若这个提示持续超过一天，说明管道停了。
       </p>
     </main>
   );

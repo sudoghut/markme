@@ -9,7 +9,7 @@
 import { PoolTable, type Row } from "@/components/PoolTable";
 import { RepoLink } from "@/components/RepoLink";
 import { TopThree } from "@/components/TopThree";
-import { EmptyDatabase, StaleBanner, failClosed } from "@/components/States";
+import { EmptyDatabase, PreliminaryBadge, StaleBanner, failClosed } from "@/components/States";
 import { app, metrics as metricSpecs, strength, universe } from "@/lib/config";
 import { poolColumns } from "@/lib/columns";
 import { parseSort, sortRows } from "@/lib/sort";
@@ -79,7 +79,7 @@ export default async function Dashboard({
     rest<MetricRow>(`metrics_daily?select=*&date=eq.${asOf}`, R),
     rest<StrengthRow>(`v_strength_enriched?select=*&date=eq.${asOf}&order=rank`, R),
     rest<PriceRow>(
-      `prices_daily?select=symbol,date,close,adj_close&date=lte.${asOf}&order=date.desc&limit=${app.sparkline_bars * 20}`,
+      `prices_daily?select=symbol,date,close,adj_close,preliminary&date=lte.${asOf}&order=date.desc&limit=${app.sparkline_bars * 20}`,
       R,
     ),
     // **数 asOf 之后还有几个 session**，而不是取最近 N 个再去里面找。
@@ -167,6 +167,8 @@ export default async function Dashboard({
   // 今天这根尚未收盘的 session 已经被算进去了，盘中会高报 1。
   // 比原来「永远高报 1」好，但不是零误差。
   const sessionsBehind = sessions.rows.length;
+  // 最新那天只要有一只是临时值，就在页首标出来（docs/provisional-close.md）。
+  const preliminary = prices.rows.some((p) => p.date === asOf && p.preliminary === true);
   const daysBehind = daysBetween(asOf, today);
   const top3 = ranks.rows.filter((r) => r.in_top_n).slice(0, strength.top_n);
 
@@ -181,6 +183,7 @@ export default async function Dashboard({
           </div>
           <p className="num text-xs text-zinc-500">
             数据截至 {asOf}（{MARKET_TZ_LABEL}）收盘
+            <PreliminaryBadge show={preliminary} />
           </p>
         </header>
 

@@ -189,18 +189,8 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   它一条单独被 GitHub 丢掉或迟到过午夜，当天就零告警；
   次日整窗重抓会补数据，故障持续则次日照常告警 —— 是告警推迟一天，不是丢数据。
   枚举与测试都假设 7 条 cron 延迟相同。
-- **「跨 ET 午夜 → 当天数据永久丢失」说重了**（`daily.yml` 头部、§7.1、
-  `test_schedule_dst.py` docstring）。日常跑每次重写整窗，漏掉的那天会被次日补上，
-  实际后果是晚一天（2026-09-30 就是这么手动补回来的）。
-- **`workflow_dispatch --force` / `backfill` 在交易日放行之前会挑到今天的 session。**
-  `run_daily.py` 里 `session = gate.session or last_settled_session(...)` —— 而
-  `skipped_too_early` 分支返回的 `gate.session` 就是今天。于是「早上手动补昨天」
-  只会再报一次 `stale_vendor`、什么都不写。修复跑那一支已经钳到上一个已定稿的
-  session，这一支没有。**另开分支修。** 修时顺带把 `vendor_grace` 限定为
-  `session.date == 当天 ET` —— 否则 force 拿到错 session 时，截止前的落后也会被宽限（第 6 轮）。
 - 两个 `checkout` 都没设 `persist-credentials: false`（token 只读，风险低，与其余 workflow 一致）。
-- **闸门 A 第 7 轮的文案项（非 SERIOUS）。** ① `create-project.md:997` 与
-  `calendar_gate.py:193` 的「§10.5 的『部分标的缺失』态」指错章节 —— 应为 §10.6
-  （pre-existing）；② 闸门 3 那条没写「截止后基准落后是 `stale_vendor` 而非 `partial`」
-  （§7.2 表是对的）；③ `test_run_once_behavior.py:244` docstring 引的是 §7.2 旧表文字；
-  ④ `test_run_daily.py:172`「下游三处」应为四处。
+- **M13 已还**（`docs/provisional-close.md`）：force / backfill 在放行前挑到今天的 session
+  （连同 `vendor_grace` 限定为「session 就是今天」）；「跨午夜 → 永久丢失」措辞
+  （现在是「转为定稿跑」）；闸门 A 第 7 轮的四条文案项（§10.5 → §10.6 错号、闸门 3 那条
+  的截止后状态、测试 docstring 引旧表、「三处」→「四处」）。

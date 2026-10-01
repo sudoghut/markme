@@ -93,7 +93,8 @@ class TestRealConfigParses:
 
     def test_app_params(self, cfg: Config) -> None:
         assert cfg.app.lookback_bars == 400  # EMA60 的 6×N=360 取整留裕量
-        assert cfg.app.settle_minutes == 330  # 收盘 +5.5h：Yahoo 22:15 ET 才结算完
+        assert cfg.app.settle_minutes == 60  # 收盘 +1h 出临时结果（分钟线）
+        assert cfg.app.final_settle_minutes == 330  # 收盘 +5.5h：日线才算定稿
         assert cfg.app.sessions_start_date.isoformat() == "2024-01-02"
 
     def test_strength_defaults(self, cfg: Config) -> None:

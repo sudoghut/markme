@@ -267,6 +267,19 @@ where date < (select max(date) from metrics_daily)
        or next_earnings_is_estimated is not null
        or next_dividend_is_estimated is not null);
 
+-- name: 历史价格行不得是临时值
+--
+-- M13（docs/provisional-close.md）的原则后半句：**前一天及更早的历史必须是
+-- 定稿数字。** 临时值只允许出现在最新一天上（收盘后 → 定稿之前那段时间）。
+--
+-- 违规的那一刻，管道自己已经告过一次警了（下一个交易日的临时跑记 partial：
+-- 「正式收盘价仍未拿到，保留临时值」）。这条是给「那条告警被看漏了」留的
+-- 第二道：它挂在 keepalive 上，每天都会再响一次，直到那一行被定稿。
+select symbol || ' ' || date::text as violation
+from prices_daily
+where preliminary
+  and date < (select max(date) from prices_daily);
+
 -- name: 最新一天的榜单行数必须等于排名池大小
 --
 -- **查的是视图，不是基表。** 初版查 strength_daily —— 那样一个
