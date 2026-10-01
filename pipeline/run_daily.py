@@ -508,6 +508,7 @@ def _settle_prices(
         for r in reuse
         if (r["symbol"], r["date"]) not in have
         and outcome.per_symbol_source.get(str(r["symbol"])) == "yfinance"
+        and r.get("source") == "yfinance"
     ]
     if reused:
         prices = pd.concat(
@@ -525,6 +526,7 @@ def _settle_prices(
         if (r["symbol"], r["date"]) not in have
         # 降级到 Stooq 的窗口里拼一行 Yahoo 进去就是规则 1 的接缝
         and outcome.per_symbol_source.get(str(r["symbol"])) == "yfinance"
+        and r.get("source") == "yfinance"
         # 日历里已经没有的日子（历史修订删掉的）不带回来 —— 指标的输入必须按
         # trading_sessions 过滤（§9.1.4 第 4 条），保留行同样不例外。
         and r["date"] in session_dates

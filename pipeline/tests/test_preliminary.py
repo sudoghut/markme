@@ -699,6 +699,31 @@ class TestTheFinalizeRun:
         assert "沿用库里的临时值" not in report.message
         assert not [r for r in _prices_written(calls) if r["symbol"] == x and r["date"] == friday]
 
+    def test_a_stooq_row_in_the_database_is_not_reused_into_a_yahoo_window(
+        self, harness: Any
+    ) -> None:
+        """规则 1 的另一个方向：前一晚整窗降级写下的是一行 Stooq 临时值，今天窗口回到
+        yfinance —— 那一行不能被拼进来。只看本跑窗口的源是不够的。"""
+        calls, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        friday = sessions[-1].date
+        days = [s.date for s in sessions]
+        x = symbols[4]
+        frame = pd.concat(
+            [_frame([s for s in symbols if s != x], days), _frame([x], days[:-1])],
+            ignore_index=True,
+        )
+        _wire(rd, monkeypatch, sessions, frame, symbols=symbols)
+        monkeypatch.setattr(rd, "_final_rows", lambda conn, syms, day: len(syms) - 1)
+        row = {"symbol": x, "date": friday, "close": None, "adj_close": 105.9, "source": "stooq"}
+        monkeypatch.setattr(rd, "_preliminary_rows", lambda *a, **k: [row])
+        report = rd.run_once(
+            FakeConn(), cfg, now=datetime.combine(friday + timedelta(days=1), time(9, 0), tzinfo=ET)
+        )
+        assert "沿用库里的临时值" not in report.message
+        assert not [r for r in _prices_written(calls) if r["symbol"] == x and r["date"] == friday]
+
     def test_a_reused_row_is_written_once(self, harness: Any) -> None:
         """同一个 (symbol, date) 在一条 upsert 里出现两次，Postgres 会让整个 T2 失败。
 
@@ -970,17 +995,32 @@ class TestTheMigration:
         assert "begin;" in sql and "commit;" in sql
         assert "set search_path = ''" in sql
 
-    def test_the_invariant_only_tolerates_the_latest_day(self) -> None:
-        from pipeline.schema import MIGRATIONS_DIR
+    @staticmethod
+    def _assertion(name: str) -> str:
+        """按名字取出**那一条**断言，并去掉注释 —— 不对整个文件原文做子串匹配。
 
-        inv = (MIGRATIONS_DIR.parent / "invariants.sql").read_text(encoding="utf-8")
-        assert "where preliminary\n  and date < (select max(date) from prices_daily)" in inv
-        assert "t_prices_keep_final" in inv
-        assert "tgname < 't_prices_touch'" in inv
-        assert "and date in (select date from trading_sessions)" in inv, "日历过滤"
-        assert "and t.tgenabled in ('O', 'A')" in inv, "禁用 / replica-only 不算挂上"
-        assert "and (t.tgtype & 2) = 2" in inv, "必须是 BEFORE（AFTER 跳不掉那一行）"
-        assert "symbol in (select symbol from symbols where enabled)" in inv
+        原文匹配会在散文上通过：把这几行 SQL 改成注释，测试照样绿（闸门 A 第 3 轮实测）。
+        """
+        from pipeline.invariants import parse_invariants
+
+        sql = next(a.sql for a in parse_invariants() if a.name == name)
+        return "\n".join(ln.split("--", 1)[0] for ln in sql.splitlines())
+
+    def test_the_invariant_only_tolerates_the_latest_day(self) -> None:
+        sql = self._assertion("历史价格行不得是临时值")
+        assert "where preliminary\n  and date < (select max(date) from prices_daily)" in sql
+        assert "and date in (select date from trading_sessions)" in sql, "日历过滤"
+        assert "symbol in (select symbol from symbols where enabled)" in sql, "只看启用中的"
+
+    def test_the_trigger_invariant_checks_what_matters(self) -> None:
+        sql = self._assertion("定稿行不被临时行覆盖的触发器必须挂对")
+        assert "t.tgname = 't_prices_keep_final'" in sql
+        assert "p.proname = 'keep_final_prices'" in sql
+        assert "and t.tgenabled in ('O', 'A')" in sql, "禁用 / replica-only 不算挂上"
+        assert "and (t.tgtype & 1) = 1" in sql, "必须是行级"
+        assert "and (t.tgtype & 2) = 2" in sql, "必须是 BEFORE（AFTER 跳不掉那一行）"
+        assert "and (t.tgtype & 16) = 16" in sql, "必须挂在 UPDATE 上"
+        assert "t.tgname < 't_prices_touch'" in sql, "必须排在 touch 之前"
 
 
 class TestTheConfigOrdering:
