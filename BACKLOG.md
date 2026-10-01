@@ -199,3 +199,8 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   session，这一支没有。**另开分支修。** 修时顺带把 `vendor_grace` 限定为
   `session.date == 当天 ET` —— 否则 force 拿到错 session 时，截止前的落后也会被宽限（第 6 轮）。
 - 两个 `checkout` 都没设 `persist-credentials: false`（token 只读，风险低，与其余 workflow 一致）。
+- **闸门 A 第 7 轮的文案项（非 SERIOUS）。** ① `create-project.md:997` 与
+  `calendar_gate.py:193` 的「§10.5 的『部分标的缺失』态」指错章节 —— 应为 §10.6
+  （pre-existing）；② 闸门 3 那条没写「截止后基准落后是 `stale_vendor` 而非 `partial`」
+  （§7.2 表是对的）；③ `test_run_once_behavior.py:244` docstring 引的是 §7.2 旧表文字；
+  ④ `test_run_daily.py:172`「下游三处」应为四处。
