@@ -169,8 +169,8 @@ class TestStatusEscalation:
         `partial` 与 `stale_vendor` 曾经同为 rank 2 —— 那时无所谓，都 exit 1。
         M12 让 `stale_vendor` 在截止时刻之前 exit 0 之后，同 rank 变成了
         **静音器**：「基准落后」那一支不 return、会继续往下走，一旦它先把状态
-        锁成 `stale_vendor`，下游三处 `escalate("partial")`（窗口内有空洞 /
-        事件预算耗尽 / 非预热区算不出横截面）全部变成空操作，
+        锁成 `stale_vendor`，下游四处 `escalate("partial")`（窗口内有空洞 /
+        事件预算耗尽 / 非预热区算不出横截面 / 重验证失败）全部变成空操作，
         **而那一跑照样写库、照样把结果推上线**。
         """
         r = RunReport(status="stale_vendor")
@@ -341,7 +341,7 @@ class TestBudgetExhaustionAbandonsTheRun:
         # 什么都没验证（这个错在本仓库里犯过两次了）。
         code = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
         blocks = code.split("except (BudgetExceeded, RetryAfterTooLong)")[1:]
-        assert len(blocks) == 2, "价格阶段与事件阶段各一处"
+        assert len(blocks) == 3, "价格阶段、分钟线阶段与事件阶段各一处"
         for b in blocks:
             # **只看这个 except 块自己的块体** —— 切到第一个 return report 为止。
             # 取一个固定字数的窗口会滑进后面的代码：`ok_events_stale` 那条路径

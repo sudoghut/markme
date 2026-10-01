@@ -63,6 +63,7 @@ RunStatus = Literal[
     "running",
     "ok",
     "ok_events_stale",
+    "ok_preliminary",
     "skipped_holiday",
     "skipped_too_early",
     "skipped_already_done",
@@ -82,6 +83,9 @@ PRICE_WRITE_COLUMNS = (
     "adj_close",
     "volume",
     "source",
+    # 收盘后先出的临时值（docs/provisional-close.md）。**定稿行不会被它覆盖** ——
+    # 那条由 0003 的触发器在库里强制，不靠调用方自觉。
+    "preliminary",
 )
 
 #: ``computed_at`` 由触发器维护。
@@ -275,7 +279,11 @@ def _upsert(
 
 def upsert_prices(conn: psycopg.Connection[Any], rows: Sequence[dict[str, Any]]) -> int:
     """``prices_daily``：冲突目标 ``(symbol, date)``。**不删除** ——
-    写入角色对这张表根本没有 DELETE 权限（§8.1.1 实测）。"""
+    写入角色对这张表根本没有 DELETE 权限（§8.1.1 实测）。
+
+    ``preliminary`` 是 NOT NULL，没带这个键的行一律按**定稿**写 —— 只有
+    明确标了临时的行才是临时的，而不是反过来。"""
+    rows = [{**r, "preliminary": bool(r.get("preliminary") or False)} for r in rows]
     return _upsert(conn, "prices_daily", PRICE_WRITE_COLUMNS, ("symbol", "date"), rows)
 
 
@@ -486,6 +494,11 @@ def _same_price(new: dict[str, Any], old: dict[str, Any]) -> bool:
             continue
         if a is None or b is None or not _close_enough(a, b):
             return False
+    # **临时 → 定稿时，价格可能一分不差。** 15:59 那根分钟线的收盘价恰好等于
+    # 正式收盘价并不罕见；只比价格的话，这一行会被判成「没变」而不写，
+    # 于是 `preliminary` 永远翻不回 false —— 页面一直挂着「临时」，历史里混进临时行。
+    if bool(new.get("preliminary") or False) != bool(old.get("preliminary") or False):
+        return False
     return str(new.get("source")) == str(old.get("source"))
 
 

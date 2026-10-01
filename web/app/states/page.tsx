@@ -16,7 +16,7 @@
  * 恰好是最需要看懂这几个态的时刻。
  */
 import { PoolTable, type Row } from "@/components/PoolTable";
-import { EmptyDatabase, StaleBanner, UnavailableNotice, failClosed } from "@/components/States";
+import { EmptyDatabase, PreliminaryBadge, StaleBanner, UnavailableNotice, failClosed } from "@/components/States";
 import { metrics as metricSpecs, universe } from "@/lib/config";
 import { poolColumns } from "@/lib/columns";
 import { STALE_AFTER_DAYS } from "@/lib/market";
@@ -172,7 +172,7 @@ export default async function States({
 
       <Block
         title={`② 数据陈旧（落后 ≥ ${STALE_AFTER_DAYS} 个日历日）`}
-        note={`dead-man 场景。判据是日历日不是交易日 —— 管道要等数据源结算完收盘价、当晚才写入，当天、周末、假日落后都是常态，按交易日判会天天亮一次黄条（理由见 lib/market.ts 的 STALE_AFTER_DAYS）。亮起来之后两个数都印：触发用的日历日，以及漏了几根 bar 的交易日数。`}
+        note={`dead-man 场景。判据是日历日不是交易日 —— 管道收盘约一小时后才写入当天的临时结果，当天收盘前、周末、假日落后都是常态，按交易日判会天天亮一次黄条（理由见 lib/market.ts 的 STALE_AFTER_DAYS）。亮起来之后两个数都印：触发用的日历日，以及漏了几根 bar 的交易日数。`}
       >
         <StaleBanner asOf="2026-08-14" sessionsBehind={26} daysBehind={STALE_DEMO_DAYS} />
         {/* 正常落后（周五收盘、周二来看）——**故意放一个渲染为 null 的调用**。
@@ -188,6 +188,21 @@ export default async function States({
           那就是每天收盘后、以及整个周末的常态：
           <strong className="text-zinc-400">什么都不显示</strong>，
           由页首那行「数据截至 …」把事实说清楚。）
+        </p>
+      </Block>
+
+      <Block
+        title="②½ 盘后临时数据"
+        note="收盘约一小时后先出的结果：当天收盘价取自收盘前最后一根分钟线，与正式收盘价差在收盘竞价那一笔。页首右上角挂这枚标记，直到当晚或次日换成正式收盘价。历史那些天不会出现它 —— 前一天及更早的数字必须是定稿。"
+      >
+        <p className="num px-1 text-xs text-zinc-500">
+          数据截至 2026-09-30（ET）收盘
+          <PreliminaryBadge show />
+        </p>
+        <PreliminaryBadge show={false} />
+        <p className="mt-2 px-1 text-xs text-zinc-600">
+          （同上一格：这里还有第二个 <code className="text-zinc-500">PreliminaryBadge</code>，传的是
+          <code className="text-zinc-500">show=false</code>，渲染为 <code className="text-zinc-500">null</code> —— 定稿之后的常态。）
         </p>
       </Block>
 

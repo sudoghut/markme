@@ -38,9 +38,9 @@ from __future__ import annotations
 import io
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -58,6 +58,7 @@ __all__ = [
     "check_sanity",
     "cross_source_gap",
     "fetch_window",
+    "intraday_frame",
     "restrict_to_sessions",
     "stooq_frame",
     "yfinance_frame",
@@ -171,6 +172,106 @@ def _tidy_yfinance(raw: pd.DataFrame, symbols: Sequence[str]) -> pd.DataFrame:
     return (
         pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
     )
+
+
+# ---------------------------------------------------------------------------
+# yfinance 分钟线 → 当天的**临时**日线行（docs/provisional-close.md）
+# ---------------------------------------------------------------------------
+#: 最后一根分钟线离收盘不得超过这么久。更早就不是「收盘价」了 ——
+#: 停牌、或者供应商只给了半天的分钟线，拿它当收盘价是一个看起来正常的错数。
+_INTRADAY_MAX_TAIL_GAP = timedelta(minutes=30)
+
+
+def intraday_frame(
+    symbols: Sequence[str],
+    session: Session,
+    *,
+    download: object = None,
+) -> pd.DataFrame:
+    """用 1 分钟线拼出 ``session`` 当天的一行日线，**一次批量请求**。
+
+    收盘 +60 分钟时 Yahoo 的日线还是半根 bar（``Close`` 为 NaN，M12 实测），
+    分钟线却是完整的。拼法：``open`` = 第一根 Open，``high`` / ``low`` = 全天极值，
+    ``close`` = 最后一根 Close，``volume`` = 求和。
+
+    **``adj_close`` = ``close``。** 复权是向过去追溯的，最新那一天的复权价就是原价
+    （实测 9-22…9-30 共 7 天 × 17 只，两者之差为 0）。所以这一行与同一窗口里
+    Yahoo 的日线**同源同基准** —— 不违反「一个窗口内不得混用数据源」（规则 1），
+    ``source`` 照样写 ``yfinance``；它的「临时」由调用方打的 ``preliminary`` 表达。
+
+    与正式收盘价的差来自 16:00 那一笔收盘竞价不在 15:59 那根里：实测中位数
+    1–2 bp，最大 22 bp。所以它只能是临时值，必须在定稿时被替换。
+    """
+    if not symbols:
+        return _empty_frame()
+    fn = download or _yf_download
+    day = session.date
+    raw = fn(  # type: ignore[operator]
+        list(symbols),
+        start=day.isoformat(),
+        end=(day + timedelta(days=1)).isoformat(),
+        interval="1m",
+        prepost=False,  # 只要常规交易时段 —— 盘后成交不是收盘价
+        auto_adjust=False,
+        progress=False,
+        group_by="column",
+        threads=False,  # §7.3.1：串行，不并发
+    )
+    if raw is None or raw.empty:
+        return _empty_frame()
+
+    from pipeline.calendar_gate import ET
+
+    idx = pd.DatetimeIndex(raw.index)
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx
+    et = idx.tz_convert(ET)
+    close_at = datetime.combine(day, session.close_et, tzinfo=ET)
+    in_session = (et.date == day) & (et < pd.Timestamp(close_at))
+
+    rows: list[dict[str, object]] = []
+    for sym in symbols:
+        try:
+            block = raw.xs(sym, axis=1, level=1) if raw.columns.nlevels == 2 else raw
+        except KeyError:
+            continue
+        b = pd.DataFrame(block)
+        b.index = et
+        b = b[in_session]
+        if "Close" not in b.columns:
+            continue
+        b = b[pd.to_numeric(b["Close"], errors="coerce").notna()]
+        if b.empty:
+            continue  # 整块 NaN = 没拿到，不是数据
+        if close_at - b.index[-1].to_pydatetime() > _INTRADAY_MAX_TAIL_GAP:
+            continue  # 最后一根离收盘太远，那不是收盘价
+        close = float(pd.to_numeric(b["Close"]).iloc[-1])
+        rows.append(
+            {
+                "symbol": sym,
+                "date": day,
+                "open": _agg(b, "Open", "first"),
+                "high": _agg(b, "High", "max"),
+                "low": _agg(b, "Low", "min"),
+                "close": close,
+                "adj_close": close,
+                "volume": _agg(b, "Volume", "sum"),
+                "source": "yfinance",
+            }
+        )
+    if not rows:
+        return _empty_frame()
+    return pd.DataFrame(rows, columns=list(PRICE_COLUMNS))
+
+
+def _agg(b: pd.DataFrame, name: str, how: str) -> float | None:
+    """分钟线某一列的聚合；列缺失或全 NaN 时给 None（写库是 NULL，不是 0）。"""
+    if name not in b.columns:
+        return None
+    s = pd.Series(pd.to_numeric(b[name], errors="coerce")).dropna()
+    if s.empty:
+        return None
+    v = {"first": s.iloc[0], "max": s.max(), "min": s.min(), "sum": s.sum()}[how]
+    return float(v)
 
 
 def _col(block: pd.DataFrame, name: str) -> pd.Series:
@@ -399,12 +500,18 @@ def fetch_window(
     yf_frame: object = None,
     stooq: object = None,
     corporate_action_dates: dict[str, set[date]] | None = None,
+    require: Mapping[str, Collection[date]] | None = None,
 ) -> FetchOutcome:
     """抓整个窗口；拿不到的标的**用备源重抓整个窗口**。
 
     **这里没有行级 fallback，那是故意的**（§3.0 规则 3）：
     单行拼接会让接缝两侧的日收益各自错一整个累计复权差，
     并污染其后 126 个交易日的 beta / resid_vol / alpha t 值。
+
+    ``require``：每个标的**必须**拿到的日子（库里还挂着临时值、该定稿了的那些天）。
+    yfinance 给了这个标的、却缺了其中某天时，**整窗**换 Stooq 再问一次
+    （docs/provisional-close.md 的「定稿兜底」）；Stooq 也没有，就留着 yfinance
+    这一份 —— 缺的那天由调用方保留临时值并告警，**不拿任何东西冒充定稿**。
     """
     yfn = yf_frame or yfinance_frame
     stq = stooq or stooq_frame
@@ -419,6 +526,30 @@ def fetch_window(
     per_source: dict[str, Source] = dict.fromkeys(got, "yfinance")
     degraded: list[str] = []
     missing: list[str] = []
+
+    # ── 定稿兜底：yfinance 给了，但缺了必须定稿的那天 ─────────────────────
+    for sym, need in sorted((require or {}).items()):
+        if sym not in got or not need:
+            continue
+        have = set(primary.loc[primary["symbol"] == sym, "date"])
+        if set(need) <= have:
+            continue
+        try:
+            alt = budget.request(
+                lambda s=sym: stq(s, start, end),  # type: ignore[misc,operator]
+                what=f"Stooq 整窗 {sym}（定稿兜底）",
+            )
+        except (BudgetExceeded, RetryAfterTooLong):
+            raise
+        except Exception:  # noqa: S112 —— 备源也不行：留着 yfinance，缺的那天由调用方保留临时值并告警
+            continue
+        if alt.empty or not set(need) <= set(alt["date"]):
+            continue
+        # **整窗替换**，不是把缺的那天拼进去（规则 1）。
+        frames[0] = primary = primary[primary["symbol"] != sym].reset_index(drop=True)
+        frames.append(alt)
+        per_source[sym] = "stooq"
+        degraded.append(sym)
 
     for sym in symbols:
         if sym in got:

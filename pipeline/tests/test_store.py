@@ -46,15 +46,23 @@ class TestWriteColumnsMatchTheSchema:
         assert "id" not in STRENGTH_WRITE_COLUMNS
 
     def test_write_columns_are_real_columns(self) -> None:
-        from pipeline.schema import MIGRATIONS_DIR, parse_create_table_columns
+        from pipeline.schema import MIGRATIONS_DIR, added_columns, parse_create_table_columns
 
         sql = (MIGRATIONS_DIR / "0001_init.sql").read_text(encoding="utf-8")
+        # 0001 之后的增量迁移（不含回滚）加出来的列也算 —— 例如 0003 的 preliminary。
+        later = [
+            p.read_text(encoding="utf-8")
+            for p in sorted(MIGRATIONS_DIR.glob("0*.sql"))
+            if p.name != "0001_init.sql" and not p.name.endswith("_rollback.sql")
+        ]
         for table, cols in (
             ("prices_daily", PRICE_WRITE_COLUMNS),
             ("metrics_daily", METRICS_WRITE_COLUMNS),
             ("strength_daily", STRENGTH_WRITE_COLUMNS),
         ):
             actual = set(parse_create_table_columns(sql, table))
+            for s in later:
+                actual |= set(added_columns(s, table))
             assert set(cols) <= actual, f"{table}: {set(cols) - actual}"
 
     def test_every_metrics_column_is_written(self) -> None:

@@ -380,7 +380,10 @@ class SiteConfig(_Strict):
 
 class AppConfig(_Strict):
     site: SiteConfig
+    #: 收盘后多久开始出**临时**结果（§7.2 闸门 2）。
     settle_minutes: PosInt
+    #: 收盘后多久才把当天的日线当作定稿。理由见 app.yaml 与 docs/provisional-close.md。
+    final_settle_minutes: PosInt
     #: `stale_vendor` 在这个 ET 时刻之前只记录不告警（§7.2）。理由见 app.yaml。
     vendor_deadline_et: time
     lookback_bars: PosInt
@@ -397,6 +400,11 @@ class AppConfig(_Strict):
 
     @model_validator(mode="after")
     def _check(self) -> Self:
+        if self.final_settle_minutes < self.settle_minutes:
+            raise ConfigError(
+                f"final_settle_minutes({self.final_settle_minutes}) < "
+                f"settle_minutes({self.settle_minutes})：还没开始出临时结果，就已经算定稿了。"
+            )
         if self.sparkline_bars > self.lookback_bars:
             raise ConfigError(
                 f"sparkline_bars({self.sparkline_bars}) > lookback_bars({self.lookback_bars})："

@@ -14,10 +14,14 @@
 2. **GitHub cron 会迟到。** 实测 2026-09-25…09-30 连续多日延后约 3–3.6 小时。
    一张只按「准时」算过的落点表，在生产里是另一张表。
 
-于是矩阵是 **7 条 cron × 2 个时区 × 2 种延迟 = 28 格**（全日市），
-外加半日市的覆盖度断言。``settle_minutes`` 同步从 60 改到 330，理由写在
-``config/app.yaml`` 里：Yahoo 的收盘价要到 22:15 ET 才结算完，
-按 +60 分钟去问必然拿到半根 bar。
+M13（docs/provisional-close.md）把 ``settle_minutes`` 改回 60：收盘 +1 小时就出
+**临时**结果（收盘价取自分钟线），定稿留给 ``final_settle_minutes``（330）之后的日线。
+晚间 cron 加了一条 ``0 21``，于是矩阵是 **8 条 cron × 2 个时区 × 2 种延迟 = 32 格**
+（全日市），外加半日市的覆盖度断言，以及**每天早上两条定稿 cron** 的落点断言。
+
+跨午夜那一维仍然要测 —— 闸门照旧会把午夜后的那一跑判给第二天 —— 但它的后果
+从「当天数据永久丢失」变成了「转为定稿跑」：闸门没放行而上一个 session 还没全员
+定稿时，``run_daily`` 钳到那一天去定稿（``test_run_once_behavior.py`` 里测）。
 """
 
 from __future__ import annotations
@@ -36,14 +40,15 @@ from pipeline.sessions import Session
 
 UTC = ZoneInfo("UTC")
 
-#: 与 `config/app.yaml` 的 settle_minutes 同步。全日市 → 21:30 ET 放行。
-SETTLE = 330
+#: 与 `config/app.yaml` 的 settle_minutes 同步。全日市 → 17:00 ET 放行（临时结果）。
+SETTLE = 60
 
 WORKFLOWS = Path(__file__).resolve().parent.parent.parent / ".github" / "workflows"
 
-#: daily.yml 里那七条 cron：(小时, 分钟, 相对会话日的 UTC 天偏移)。
+#: daily.yml 里那八条晚间 cron：(小时, 分钟, 相对会话日的 UTC 天偏移)。
 #: 偏移 1 的那几条写的是 `2-6`（周二到周六）—— 02:00Z 周六 = 21:00 ET 周五。
 CRONS: tuple[tuple[int, int, int], ...] = (
+    (21, 0, 0),
     (22, 0, 0),
     (23, 0, 0),
     (0, 0, 1),
@@ -95,19 +100,21 @@ def _ran_for_that_session(
 
 
 #: 全日市的落点表，与 `daily.yml` 头部那张表逐格对应。
-#: 键是 (时区标记, 延迟小时)，值是七条 cron 各自放不放行。
+#: 键是 (时区标记, 延迟小时)，值是八条 cron 各自放不放行。
+_T, _F = True, False
 FULL_DAY_TABLE: dict[tuple[str, int], tuple[bool, ...]] = {
-    ("EDT", 0): (False, False, False, False, True, True, False),
-    ("EDT", 3): (False, True, True, False, False, False, False),
-    ("EST", 0): (False, False, False, False, False, True, True),
-    ("EST", 3): (False, False, True, True, False, False, False),
+    #             21:00 22:00 23:00 00:00 01:00 02:00 03:30 04:30 (UTC)
+    ("EDT", 0): (_T, _T, _T, _T, _T, _T, _T, _F),
+    ("EDT", 3): (_T, _T, _T, _T, _F, _F, _F, _F),
+    ("EST", 0): (_F, _T, _T, _T, _T, _T, _T, _T),
+    ("EST", 3): (_T, _T, _T, _T, _T, _F, _F, _F),
 }
 
 DAYS = {"EDT": EDT_DAY, "EST": EST_DAY}
 
 
 class TestTheLandingTable:
-    """7 条 cron × 2 个时区 × 2 种延迟。**逐格列举，不靠循环里的一个断言。**"""
+    """8 条 cron × 2 个时区 × 2 种延迟。**逐格列举，不靠循环里的一个断言。**"""
 
     @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
     @pytest.mark.parametrize("idx", range(len(CRONS)))
@@ -140,9 +147,9 @@ class TestTheNetEffect:
     ) -> None:
         """跨过午夜 ET 的那几跑，``when_to_run`` 会把它们判给**第二天**。
 
-        这是比「太早」更坏的一种失败：太早会被当天后面几跑救回来，
-        跨午夜不会 —— 判 ``skipped_too_early`` / ``skipped_holiday``，
-        exit 0、不告警、当天数据**永久丢失**。
+        M12 时这意味着当天数据**永久丢失**；M13 起闸门没放行时会转为定稿跑
+        （钳到上一个还没全员定稿的 session）。但闸门本身的这条行为没变，
+        而定稿跑的整条逻辑都押在它上面 —— 所以照样钉住。
 
         断的是闸门自己的行为（``_decide`` 的原始判定），不是
         ``_ran_for_that_session`` —— 后者已经把「会话必须等于当天」
@@ -160,20 +167,27 @@ class TestTheNetEffect:
 
     @pytest.mark.parametrize(("zone", "delay"), list(FULL_DAY_TABLE))
     def test_every_passing_run_is_after_the_gate_opens(self, zone: str, delay: int) -> None:
-        """放行的跑都在 21:30 ET 之后 —— 也就是闸门 2 的开门时刻。
+        """放行的跑都在 17:00 ET（收盘 +1h）之后 —— 闸门 2 的开门时刻。
 
-        **注意这条断的不是「供应商已经结算」。** 实测结算在 22:15 ET 前后，
-        而 3h 延迟下每天第一跑恰好落在 22:00 —— 早 15 分钟。
-        那个缺口不是靠排期堵的（一个观测点撑不起 15 分钟的精度），
-        是靠 ``vendor_deadline_et`` 的退出语义堵的：早到的那一跑照记
-        ``stale_vendor`` 但不告警。见下面那条绑住截止时刻的测试。
+        **注意这条断的不是「供应商已经结算」。** 实测日线要到 22:15 ET 前后才结算，
+        17:00 那一跑拿到的是临时结果（分钟线），由 ``final_settle_minutes`` 与
+        ``preliminary`` 标记负责，不是靠排期。
         """
         day = DAYS[zone]
         for cron in CRONS:
             if not _ran_for_that_session(day, cron, delay):
                 continue
             fired = _fired_at(day, cron, delay).astimezone(ET)
-            assert (fired.hour, fired.minute) >= (21, 30), f"{fired:%H:%M} ET 早于闸门 2"
+            assert (fired.hour, fired.minute) >= (17, 0), f"{fired:%H:%M} ET 早于闸门 2"
+
+    @pytest.mark.parametrize("zone", list(DAYS))
+    def test_on_time_the_first_result_is_one_hour_after_the_close(self, zone: str) -> None:
+        """**用户要的就是这个：收盘后一小时看到一个大致的结果。** 准时时第一跑 = 17:00 ET。"""
+        day = DAYS[zone]
+        first = min(
+            _fired_at(day, c, 0).astimezone(ET) for c in CRONS if _ran_for_that_session(day, c, 0)
+        )
+        assert (first.hour, first.minute) == (17, 0), f"{zone} 准时第一跑在 {first:%H:%M} ET"
 
 
 class TestTheVendorDeadlineHasSomethingToLandOn:
@@ -223,6 +237,42 @@ class TestTheVendorDeadlineHasSomethingToLandOn:
         """
         deadline = self._deadline()
         assert (deadline.hour, deadline.minute) >= (22, 15), "早于实测结算时刻会天天误报"
+
+
+#: daily.yml 里那两条**每天**的定稿 cron（UTC 小时, 分钟）。
+FINALIZE_CRONS: tuple[tuple[int, int], ...] = ((13, 0), (15, 0))
+
+
+class TestTheFinalizeCrons:
+    """早上的两条定稿 cron：**每天**（含周末、假日），且永远落在当天开闸之前。
+
+    落在开闸之前，闸门才会说「不跑」，``run_daily`` 才会转去定稿**上一个** session
+    —— 周五的临时值由周六早上定稿，假日前一天的由假日当天定稿。
+    若某条迟到到了开闸之后，它就变成当天的一次临时跑：不坏，但定稿那件事没人做了。
+    """
+
+    def test_they_are_in_the_workflow_and_run_every_day(self) -> None:
+        text = (WORKFLOWS / "daily.yml").read_text(encoding="utf-8")
+        found = re.findall(r'cron:\s*"(\d+)\s+(\d+)\s+\*\s+\*\s+\*"', text)
+        assert [(int(h), int(m)) for m, h in found] == list(FINALIZE_CRONS)
+
+    #: 0–4h、15 分钟粒度，与截止时刻那条同一把尺子。
+    FINE_DELAYS = tuple(i / 4 for i in range(17))
+
+    @pytest.mark.parametrize("zone", list(DAYS))
+    @pytest.mark.parametrize("cron", FINALIZE_CRONS)
+    def test_they_land_before_the_full_day_gate_opens(
+        self, zone: str, cron: tuple[int, int]
+    ) -> None:
+        day = DAYS[zone]
+        for delay in self.FINE_DELAYS:
+            fired = _fired_at(day, (*cron, 0), delay)
+            d = when_to_run([_session(day, 1)], fired, SETTLE)
+            assert not d.should_run, (
+                f"{zone} 延迟{delay}h：{fired.astimezone(ET):%H:%M} ET 已过当天开闸，"
+                "定稿跑变成了当天的临时跑"
+            )
+            assert fired.astimezone(ET).date() == day, "必须落在 cron 的那个 ET 日内"
 
 
 class TestHalfDays:

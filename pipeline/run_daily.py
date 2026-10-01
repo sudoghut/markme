@@ -33,10 +33,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
 from psycopg import sql
 
 from pipeline.calendar_gate import (
     ET,
+    gate_opens_at,
     interior_gaps,
     last_settled_session,
     stale_symbols,
@@ -44,7 +46,7 @@ from pipeline.calendar_gate import (
 )
 from pipeline.compute import build_windows, compute_metrics, compute_strength
 from pipeline.config import load_config
-from pipeline.fetch import fetch_window, restrict_to_sessions
+from pipeline.fetch import check_sanity, fetch_window, intraday_frame, restrict_to_sessions
 from pipeline.fetch_events import distances_for, fetch_symbol_events, should_refresh
 from pipeline.sessions import lookback_window
 from pipeline.store import (
@@ -74,6 +76,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅类型
     import psycopg
 
     from pipeline.config import Config
+    from pipeline.fetch import FetchOutcome
     from pipeline.sessions import Session
     from pipeline.store import RunStatus
 
@@ -130,7 +133,17 @@ class RunReport:
         语义上也该如此：``stale_vendor`` 可能是良性的（在等供应商），
         ``partial`` 从来不是。两者同时成立时，**该响的是 partial**。
         """
-        rank = {"ok": 0, "ok_events_stale": 1, "stale_vendor": 2, "partial": 3, "failed": 4}
+        # ``ok_preliminary`` 压过 ``ok_events_stale``：两者同时成立时，这一跑**不能**
+        # 被 ``_already_done`` 当成「做完了」—— 否则当晚的定稿跑会被跳过，
+        # 临时值就这样留成历史。
+        rank = {
+            "ok": 0,
+            "ok_events_stale": 1,
+            "ok_preliminary": 2,
+            "stale_vendor": 3,
+            "partial": 4,
+            "failed": 5,
+        }
         if rank.get(status, 0) > rank.get(self.status, 0):
             self.status = status
 
@@ -144,12 +157,18 @@ def _existing_prices(
 ) -> dict[tuple[str, date], dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
-            "select symbol, date, close, adj_close, source from prices_daily "
+            "select symbol, date, close, adj_close, source, preliminary from prices_daily "
             "where symbol = any(%s) and date between %s and %s",
             (symbols, start, end),
         )
         return {
-            (r[0], r[1]): {"close": r[2], "adj_close": r[3], "source": r[4]} for r in cur.fetchall()
+            (r[0], r[1]): {
+                "close": r[2],
+                "adj_close": r[3],
+                "source": r[4],
+                "preliminary": r[5],
+            }
+            for r in cur.fetchall()
         }
 
 
@@ -191,6 +210,33 @@ def _carried_scores(
             (symbols, start, end),
         )
         return [{"symbol": r[0], "date": r[1], column: r[2]} for r in cur.fetchall()]
+
+
+def _final_rows(conn: psycopg.Connection[Any], symbols: list[str], day: date) -> int:
+    """``day`` 那天库里有几只标的已经是**定稿**行。少于全池 = 还有事要做。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "select count(*) from prices_daily "
+            "where date = %s and symbol = any(%s) and not preliminary",
+            (day, symbols),
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def _preliminary_rows(
+    conn: psycopg.Connection[Any], symbols: list[str], start: date, end: date
+) -> list[dict[str, Any]]:
+    """库里 ``[start, end]`` 之间**还是临时值**的价格行（整行，供保留时原样带回）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "select symbol, date, open, high, low, close, adj_close, volume, source "
+            "from prices_daily where preliminary and symbol = any(%s) "
+            "and date between %s and %s",
+            (symbols, start, end),
+        )
+        cols = ("symbol", "date", "open", "high", "low", "close", "adj_close", "volume", "source")
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
 
 
 def _already_done(conn: psycopg.Connection[Any], session_date: date) -> bool:
@@ -391,6 +437,87 @@ def _structural_blanks(sessions: Sequence[Session], start: date, cfg: Config) ->
     return set(window[: spec.min_bars - 1])
 
 
+def _settle_prices(
+    prices: pd.DataFrame,
+    outcome: FetchOutcome,
+    pending: list[dict[str, Any]],
+    session: Session,
+    now_et: datetime,
+    symbols: list[str],
+    cfg: Config,
+    budget: RequestBudget,
+    report: RunReport,
+) -> pd.DataFrame:
+    """给整窗价格打上 ``preliminary``，并补上当天缺的、保留还没定稿的。
+
+    三件事，顺序有讲究：
+
+    1. **当天的日线在 ``final_settle_minutes`` 之前一律算临时。** M12 实测日线的
+       ``Open`` 在 21:05→22:09 ET 之间还在变 —— ``Close`` 不是 NaN 不等于定稿。
+    2. **当天缺日线的，用 1 分钟线补一行临时值**（``intraday_frame``）。
+       只补窗口来自 yfinance 的标的：降级到 Stooq 的窗口复权基准不同，
+       拼一行 Yahoo 进去正是规则 1 禁止的接缝；被闸门 4 剔除的不该被这条后门放回来。
+    3. **过去的日子拿不到正式价的，保留库里的临时值，并告警**（``partial``）。
+       不保留的话那天在窗口里是个空洞：指标悄悄少一根，而那一行的临时值
+       还在库里、被当成历史。这正是用户说的「整整第二天收盘后的一个小时也拿不到」。
+    """
+    prices = prices.assign(preliminary=False)
+    final_at = gate_opens_at(session, cfg.app.final_settle_minutes)
+    if now_et < final_at:
+        prices.loc[prices["date"] == session.date, "preliminary"] = True
+
+    have_today = set(prices.loc[prices["date"] == session.date, "symbol"])
+    need = [
+        s for s in symbols if s not in have_today and outcome.per_symbol_source.get(s) == "yfinance"
+    ]
+    if need and now_et >= gate_opens_at(session, cfg.app.settle_minutes):
+        try:
+            intra = budget.request(
+                lambda: intraday_frame(need, session),
+                what=f"yfinance 分钟线 {len(need)} 标的",
+            )
+        except (BudgetExceeded, RetryAfterTooLong):
+            raise
+        except Exception as exc:  # 分钟线自己失败：当天就按落后处理（闸门 3）
+            report.note(f"分钟线抓取失败：{exc}")
+            intra = prices.iloc[0:0]
+        if not intra.empty:
+            # 闸门 4 同样适用：一根坏的分钟线收盘价和一根坏的日线一样是毒数据。
+            trial = pd.concat([prices, intra.assign(preliminary=True)], ignore_index=True)
+            bad = {i.symbol for i in check_sanity(trial[trial["symbol"].isin(intra["symbol"])])}
+            if bad:
+                report.note(f"分钟线未过合理性闸门、不采用：{', '.join(sorted(bad))}")
+            intra = intra[~intra["symbol"].isin(bad)]
+            prices = pd.concat([prices, intra.assign(preliminary=True)], ignore_index=True)
+
+    have = set(zip(prices["symbol"], prices["date"], strict=True))
+    kept = [
+        r
+        for r in pending
+        if (r["symbol"], r["date"]) not in have
+        and outcome.per_symbol_source.get(str(r["symbol"])) == "yfinance"
+    ]
+    if kept:
+        prices = pd.concat([prices, pd.DataFrame(kept).assign(preliminary=True)], ignore_index=True)
+        report.escalate("partial")
+        report.note(
+            "正式收盘价仍未拿到（yfinance 与 Stooq 都没有），保留临时值："
+            + ", ".join(f"{r['symbol']}@{r['date']}" for r in kept[:10])
+        )
+
+    prices = prices.sort_values(["symbol", "date"]).reset_index(drop=True)
+    today_pre = sorted(
+        set(prices.loc[(prices["date"] == session.date) & prices["preliminary"], "symbol"])
+    )
+    if today_pre:
+        report.escalate("ok_preliminary")
+        report.note(
+            f"{session.date} 有 {len(today_pre)} 只为临时值（定稿时刻 {final_at:%H:%M} ET 之前，"
+            "或日线还没给出、改用分钟线）"
+        )
+    return prices
+
+
 def _null_rows(symbols: Sequence[str], day: date, cfg: Config) -> list[dict[str, Any]]:
     """给闸门 3 排除掉的标的补一行**全 NULL** 的最新行（§7.2 闸门 3）。"""
     from pipeline.compute import EVENT_COLUMNS
@@ -449,39 +576,57 @@ def run_once(
     elif revision.added_future:
         report.note(revision.describe())
 
+    now_et = now.astimezone(ET)
+    symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
+
+    # 2. 闸门 1 + 2
+    gate = when_to_run(sessions, now, cfg.app.settle_minutes)
+    if gate.should_run and gate.session is not None:  # should_run 蕴含 session 存在
+        session = gate.session
+    else:
+        # **闸门没放行，不等于没事可做。** 今天还早 / 今天不开盘时，三种情况仍要跑，
+        # 而三种都必须**钳到上一个已过 settle_minutes 的 session**，不能用今天：
+        #
+        # - 日历修复（revision.needs_repair）；
+        # - 手动 --force / backfill；
+        # - **定稿跑**：上一个 session 在库里还不是全员定稿（docs/provisional-close.md）。
+        #   周五的临时值由周六这一跑定稿，假日前一天的由假日当天定稿 ——
+        #   于是「跑过 ET 午夜就挑到第二天、当天数据永久丢失」那条 M12 的硬约束，
+        #   在定稿这一侧不再成立。
+        #
+        # `when_to_run` 在 skipped_too_early 分支里返回的 gate.session 是**今天**。
+        # 拿它去跑，抓的就是一根还没收盘的 bar；而手动 dispatch 去「补昨天」，
+        # 实际挑到的是今天，只会再报一次全员落后、什么都不写（M12 记进 BACKLOG 的那条）。
+        try:
+            candidate: Session | None = last_settled_session(sessions, now, cfg.app.settle_minutes)
+        except ValueError:
+            candidate = None
+        finalize = (
+            candidate is not None
+            and not force
+            and not revision.needs_repair
+            and _final_rows(conn, symbols, candidate.date) < len(symbols)
+        )
+        if not (force or revision.needs_repair or finalize):
+            report.status = gate.decision  # type: ignore[assignment]  # 跳过类，直接赋值
+            report.note(gate.reason)
+            conn.rollback()
+            return report
+        if candidate is None:
+            # 与旧行为一致：没有任何已收盘的 session 时，force / 修复无从下手。
+            raise ValueError(f"{now_et.date()} 之前没有任何已收盘的 session")
+        session = candidate
+        why = "定稿跑" if finalize else ("日历修复" if revision.needs_repair else "手动 --force")
+        report.note(f"{why}绕过闸门（{gate.decision}），session 钳到已收盘的 {session.date}")
+
     # 「供应商还没出数」与「供应商坏了」在闸门看来现象一模一样，
     # 区分它们的是**当天还有没有补救机会**（§7.2）。判据是**时刻**不是跑次序号 ——
     # 后者要把 cron 抄进管道，而 cron 会变，抄两份必然漂移。
     # 两处 `stale_vendor` 共用这一个值：只装一处的话，另一处会把噪音原样漏回来。
-    vendor_grace = now.astimezone(ET).time() < cfg.app.vendor_deadline_et
-
-    # 2. 闸门 1 + 2
-    gate = when_to_run(sessions, now, cfg.app.settle_minutes)
-    if not gate.should_run and not force and not revision.needs_repair:
-        report.status = gate.decision  # type: ignore[assignment]  # 跳过类，直接赋值
-        report.note(gate.reason)
-        conn.rollback()
-        return report
-
-    if gate.should_run or force:
-        session = gate.session or last_settled_session(sessions, now, cfg.app.settle_minutes)
-    else:
-        # **修复跑不能用今天那根。**
-        #
-        # 走到这里只剩一种可能：闸门说了不跑，而 revision.needs_repair 把它顶开了。
-        # 而 `when_to_run` 在 skipped_too_early 分支里返回的 gate.session 是**今天** ——
-        # 于是一次自动触发的修复会去抓一根**还没过 settle_minutes** 的今日 bar：
-        # 16:00 ET（手动 dispatch 拿得到的最早时刻）上就是敲钟那一刻的价，盘中更糟。
-        #
-        # 闸门 3 拦不住（日期就是今天，`stale_symbols` 比的正是日期相等），
-        # 闸门 4 也拦不住（preliminary 与 consolidated 的差是千分位，
-        # 离 _MAX_DAILY_MOVE / _CROSS_SOURCE_TOLERANCE 十万八千里）。
-        # 写进去的就是 daily.yml 文件头那句「宁可晚几小时，不要一个会变的数字」
-        # 要防的东西，而且整窗 strength 都由它导出。
-        #
-        # 修复要的只是历史窗口，根本不需要今天那根 —— 钳到上一个已定稿的 session。
-        session = last_settled_session(sessions, now, cfg.app.settle_minutes)
-        report.note(f"日历修复绕过闸门（{gate.decision}），session 钳到已定稿的 {session.date}")
+    #
+    # **只对「session 就是今天」成立。** 定稿跑 / force 拿的是过去的 session，
+    # 那一天的后续跑早就没有了 —— 上午 10 点「还没到 22:30」不是宽限的理由。
+    vendor_grace = session.date == now_et.date() and now_et.time() < cfg.app.vendor_deadline_et
 
     report.session_date = session.date
     # **日历修订不能被「本日已做过」吞掉。**
@@ -507,7 +652,6 @@ def run_once(
     conn.rollback()
 
     # 3. 抓取整窗（§3.0 规则 2）
-    symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
     start, n_bars = lookback_window(sessions, session.date, cfg.app.lookback_bars)
     if n_bars < cfg.app.lookback_bars:
         report.note(f"窗口只有 {n_bars} 根（要 {cfg.app.lookback_bars}）")
@@ -540,8 +684,17 @@ def run_once(
         ),
         retry_max_attempts=cfg.app.retry_max_attempts,
     )
+    # **库里还挂着临时值、而 session 已经翻过去的那些天，这一跑必须给它们定稿。**
+    # 把它们交给 fetch_window 当作「必须拿到」：yfinance 缺了就整窗问 Stooq。
+    pending = [
+        r for r in _preliminary_rows(conn, symbols, start, session.date) if r["date"] < session.date
+    ]
+    conn.rollback()  # 同上：别挂着读事务去做整窗抓取
+    require: dict[str, set[date]] = {}
+    for r in pending:
+        require.setdefault(str(r["symbol"]), set()).add(r["date"])
     try:
-        outcome = fetch_window(symbols, start, session.date, budget)
+        outcome = fetch_window(symbols, start, session.date, budget, require=require)
     except (BudgetExceeded, RetryAfterTooLong) as exc:
         # §7.3.1 对这两件事的处置都是 **partial**，不是 failed：
         # 「超出即中止并记 partial」「放弃这一跑记 partial」。
@@ -584,6 +737,17 @@ def run_once(
         # 而 §7.2 承诺的是「重跑、补跑…结果都一样」。
         report.status = "failed"
         report.note("窗口内没有任何价格行")
+        conn.rollback()
+        return report
+
+    # 3b. 临时与定稿（docs/provisional-close.md）
+    try:
+        prices = _settle_prices(
+            prices, outcome, pending, session, now_et, symbols, cfg, budget, report
+        )
+    except (BudgetExceeded, RetryAfterTooLong) as exc:
+        report.escalate("partial")
+        report.note(f"分钟线抓取中止：{exc}")
         conn.rollback()
         return report
 

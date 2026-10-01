@@ -116,6 +116,27 @@ def table_names(sql: str) -> list[str]:
     ]
 
 
+def added_columns(sql: str, table: str) -> list[str]:
+    """``alter table <table> add column <col>`` 加出来的列（0001 之后的迁移用）。
+
+    只认这一种写法 —— 本仓库的增量迁移只这么写；认不出的写法会让
+    「写入列必须是 schema 的子集」那条测试变红，而不是悄悄放过。
+    """
+    import re
+
+    masked = mask(sql)
+    pat = re.compile(
+        r"alter\s+table\s+(?:only\s+)?(?P<t>[\w.\"]+)\s+add\s+column\s+"
+        r"(?:if\s+not\s+exists\s+)?(?P<c>[\w\"]+)",
+        re.IGNORECASE,
+    )
+    return [
+        normalize_identifier(sql[m.start("c") : m.end("c")])
+        for m in pat.finditer(masked)
+        if normalize_identifier(sql[m.start("t") : m.end("t")]) == table
+    ]
+
+
 def parse_create_table_columns(sql: str, table: str) -> list[str]:
     """从一段 SQL 里取出 ``table`` 的列名，按声明顺序。
 
