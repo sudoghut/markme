@@ -127,7 +127,8 @@ M0–M8 一共抓到 **45 条 SERIOUS**，逐条记在 `docs/reviews/`。
 ## English
 
 **markme** (market metrics) is a read-only US-equity indicator dashboard that
-updates automatically about an hour after each market close.
+updates automatically a few hours after each market close (the data vendor
+only finalises the daily bar around 22:00 ET).
 
 It tracks QQQ plus 16 Nasdaq stocks (17 symbols) and computes **RSI(14)**,
 **EMA(60)**, **half-year alpha & beta against QQQ**, and **days to/since the next

@@ -280,6 +280,65 @@ class TestOnlyTheBenchmarkLaggingAlsoGetsTheGrace:
         assert report.exit_code == 1, "当天已无补救机会，基准还缺就必须有人看见"
 
 
+class TestOnlyANonBenchmarkLaggingAlsoGetsTheGrace:
+    """**上一条的镜像：基准已结算，某只非基准还是半根 bar。**
+
+    它和「只有基准落后」同样是结算中的正常中间态，却曾经无条件走 `partial`
+    —— 截止之前 exit 1。新排期下多数情形的第一跑落在 22:00 ET，正好卡在
+    21:30 放行与实测 22:15 结算之间，哪种情形响取决于 Yahoo 先结算哪只。
+    （闸门 A 第 5 轮 S1。）
+
+    截止之后它**仍然**是 `partial` 并告警 —— 宽限只覆盖「当天还有后续跑」。
+    """
+
+    @staticmethod
+    def _other_lagging_run(harness: Any, at: time) -> tuple[Any, dict[str, Any]]:
+        calls, monkeypatch, rd = harness
+        cfg = load_config()
+        bench = cfg.universe.benchmark
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        symbols = [s.symbol for s in cfg.universe.symbols if s.enabled]
+        days = [s.date for s in sessions]
+        others = [s for s in symbols if s != bench]
+        # 基准与其余 15 只拿到了今天，只有一只非基准停在 D-1。
+        frame = pd.concat(
+            [_frame([bench, *others[1:]], days), _frame(others[:1], days[:-1])],
+            ignore_index=True,
+        )
+        _install_plan(rd, monkeypatch, sessions, _no_revision())
+        monkeypatch.setattr(
+            rd,
+            "fetch_window",
+            lambda *a, **k: FetchOutcome(
+                frame=frame, per_symbol_source=dict.fromkeys(symbols, "yfinance")
+            ),
+        )
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, at, tzinfo=ET))
+        return report, calls
+
+    def test_before_the_deadline_it_does_not_alert(self, harness: Any) -> None:
+        report, _ = self._other_lagging_run(harness, time(22, 0))
+        assert report.status == "stale_vendor", "截止前任何一只落后都是在等供应商"
+        assert report.exit_code == 0, "当天还有后续跑，这是结算中的正常中间态"
+        assert "当天仍有后续跑" in report.message
+
+    def test_before_the_deadline_it_still_writes(self, harness: Any) -> None:
+        """和基准那一支一样：只是尾部缺一根，其余照常入库。"""
+        _, calls = self._other_lagging_run(harness, time(22, 0))
+        assert calls["replace_strength"], "这一跑仍然要写库"
+
+    def test_after_the_deadline_it_is_partial_and_alerts(self, harness: Any) -> None:
+        report, _ = self._other_lagging_run(harness, time(23, 30))
+        assert report.status == "partial", "截止之后非基准落后仍是 partial"
+        assert report.exit_code == 1, "当天已无补救机会，必须有人看见"
+
+    def test_the_deadline_itself_alerts(self, harness: Any) -> None:
+        """**边界归告警那一侧**，与另外两支一致。"""
+        report, _ = self._other_lagging_run(harness, time(22, 30))
+        assert report.exit_code == 1
+
+
 class TestAGracedStaleVendorDoesNotSilenceRealProblems:
     """**这是整条 M12 最贵的一个交互，而它一度只被一条 dataclass 单测钉住。**
 
