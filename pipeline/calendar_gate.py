@@ -151,7 +151,9 @@ def last_settled_session(
         s for s in sessions if s.date <= today and gate_opens_at(s, settle_minutes) <= now_et
     ]
     if not settled:
-        raise ValueError(f"{today} 之前没有任何已定稿的 session（settle={settle_minutes} 分钟）")
+        raise ValueError(
+            f"{today} 之前没有任何已过闸门 2 的 session（settle={settle_minutes} 分钟）"
+        )
     return max(settled, key=lambda s: s.ordinal)
 
 

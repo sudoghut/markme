@@ -29,7 +29,7 @@ cd web && npm ci && npm run dev   # 前端
 ```bash
 uv run python -m pipeline.run_daily      # 每日增量（带四重闸门）
 uv run python -m pipeline.backfill       # 全量回填整个窗口
-uv run python -m pipeline.check_invariants   # 线上数据库的 19 条不变式
+uv run python -m pipeline.check_invariants   # 线上数据库的 22 条不变式
 ```
 
 ## 这个项目在防什么
@@ -45,7 +45,7 @@ uv run python -m pipeline.check_invariants   # 线上数据库的 19 条不变�
 | 事件表用日期做主键 | 财报改期会留下一条作废的预告行，倒计时走向一个不存在的日子，到期后**播报一场从未发生的财报** |
 | 事件抓取失败记成 `partial` | 条件重试不再跳过，放行的那几跑全部重跑，而降级到备源的那一跑会**静默覆盖好数据** |
 
-所以库里有 **19 条不变式**，每天连库跑一次；所有非有限值一律转 `NULL`
+所以库里有 **22 条不变式**，每天连库跑一次；所有非有限值一律转 `NULL`
 （绝不用 0 或上一日的值冒充）；任何一个指标窗口内的数据源必须唯一。
 
 ## 文档
@@ -67,7 +67,7 @@ uv run python -m pipeline.check_invariants   # 线上数据库的 19 条不变�
 | 文档 | 说明 | 状态 | 更新 |
 |---|---|---|---|
 | [create-project.md](docs/create-project.md) | 项目建设计划 | v3 + 实现期按实测修正 | 2026-09-21 |
-| [provisional-close.md](docs/provisional-close.md) | 收盘后先出临时结果、次日定稿（M13） | 已确认，实现中 | 2026-10-01 |
+| [provisional-close.md](docs/provisional-close.md) | 收盘后先出临时结果、次日定稿（M13）；闸门记录 [M13](docs/reviews/M13.md) | 已确认，实现中 | 2026-10-01 |
 
 ## 为什么站点有一道密码
 

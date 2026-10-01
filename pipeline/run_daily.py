@@ -441,7 +441,9 @@ def _settle_prices(
     prices: pd.DataFrame,
     outcome: FetchOutcome,
     pending: list[dict[str, Any]],
+    reuse: list[dict[str, Any]],
     session: Session,
+    session_dates: set[date],
     now_et: datetime,
     symbols: list[str],
     cfg: Config,
@@ -477,25 +479,55 @@ def _settle_prices(
                 what=f"yfinance 分钟线 {len(need)} 标的",
             )
         except (BudgetExceeded, RetryAfterTooLong):
-            raise
+            raise  # 全局护栏，不是「分钟线失败」—— 调用方放弃这一跑（§7.3.1）
         except Exception as exc:  # 分钟线自己失败：当天就按落后处理（闸门 3）
             report.note(f"分钟线抓取失败：{exc}")
             intra = prices.iloc[0:0]
         if not intra.empty:
             # 闸门 4 同样适用：一根坏的分钟线收盘价和一根坏的日线一样是毒数据。
-            trial = pd.concat([prices, intra.assign(preliminary=True)], ignore_index=True)
-            bad = {i.symbol for i in check_sanity(trial[trial["symbol"].isin(intra["symbol"])])}
+            #
+            # **只拿「前一根日线 + 这一根」去比**，不是整窗。整窗里若有一次真实的
+            # >50% 波动（跨源比对已经放行过的那种），整窗一起比会让这只标的在那次
+            # 波动滚出窗口之前**永远**拿不到分钟线临时值 —— 要判的只是这一根像不像真的。
+            prev = (
+                prices[prices["symbol"].isin(intra["symbol"]) & (prices["date"] < session.date)]
+                .sort_values("date")
+                .groupby("symbol")
+                .tail(1)
+            )
+            trial = pd.concat([prev, intra.assign(preliminary=True)], ignore_index=True)
+            bad = {i.symbol for i in check_sanity(trial)}
             if bad:
                 report.note(f"分钟线未过合理性闸门、不采用：{', '.join(sorted(bad))}")
             intra = intra[~intra["symbol"].isin(bad)]
             prices = pd.concat([prices, intra.assign(preliminary=True)], ignore_index=True)
 
     have = set(zip(prices["symbol"], prices["date"], strict=True))
+    reused = [
+        r
+        for r in reuse
+        if (r["symbol"], r["date"]) not in have
+        and outcome.per_symbol_source.get(str(r["symbol"])) == "yfinance"
+    ]
+    if reused:
+        prices = pd.concat(
+            [prices, pd.DataFrame(reused).assign(preliminary=True)], ignore_index=True
+        )
+        have |= {(r["symbol"], r["date"]) for r in reused}
+        report.note(
+            f"{session.date} 的日线与分钟线都还没来，沿用库里的临时值："
+            + ", ".join(str(r["symbol"]) for r in reused[:10])
+        )
+
     kept = [
         r
         for r in pending
         if (r["symbol"], r["date"]) not in have
+        # 降级到 Stooq 的窗口里拼一行 Yahoo 进去就是规则 1 的接缝
         and outcome.per_symbol_source.get(str(r["symbol"])) == "yfinance"
+        # 日历里已经没有的日子（历史修订删掉的）不带回来 —— 指标的输入必须按
+        # trading_sessions 过滤（§9.1.4 第 4 条），保留行同样不例外。
+        and r["date"] in session_dates
     ]
     if kept:
         prices = pd.concat([prices, pd.DataFrame(kept).assign(preliminary=True)], ignore_index=True)
@@ -686,9 +718,12 @@ def run_once(
     )
     # **库里还挂着临时值、而 session 已经翻过去的那些天，这一跑必须给它们定稿。**
     # 把它们交给 fetch_window 当作「必须拿到」：yfinance 缺了就整窗问 Stooq。
-    pending = [
-        r for r in _preliminary_rows(conn, symbols, start, session.date) if r["date"] < session.date
-    ]
+    prelim = _preliminary_rows(conn, symbols, start, session.date)
+    pending = [r for r in prelim if r["date"] < session.date]
+    # 定稿跑（session 已经不是今天）而这一天在库里还挂着临时值：日线与分钟线若都还没来，
+    # 就**沿用**它 —— 否则那只标的这一天被写成 NULL、这一天的榜单把它剔掉，
+    # 比前一晚的临时结果还差。告警留给下一个交易日的临时跑（见 _settle_prices 第 3 条）。
+    reuse = [r for r in prelim if r["date"] == session.date] if session.date < now_et.date() else []
     conn.rollback()  # 同上：别挂着读事务去做整窗抓取
     require: dict[str, set[date]] = {}
     for r in pending:
@@ -743,7 +778,17 @@ def run_once(
     # 3b. 临时与定稿（docs/provisional-close.md）
     try:
         prices = _settle_prices(
-            prices, outcome, pending, session, now_et, symbols, cfg, budget, report
+            prices,
+            outcome,
+            pending,
+            reuse,
+            session,
+            {s.date for s in sessions},
+            now_et,
+            symbols,
+            cfg,
+            budget,
+            report,
         )
     except (BudgetExceeded, RetryAfterTooLong) as exc:
         report.escalate("partial")

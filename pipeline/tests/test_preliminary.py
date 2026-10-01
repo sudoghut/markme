@@ -46,6 +46,7 @@ def _minute_bars(
     end = datetime.combine(day, last, tzinfo=ET)
     stamps = list(pd.date_range(start, end, freq="1min").to_pydatetime())
     if extra_after_close:  # 收盘之后、另一天的行都必须被排除
+        stamps.append(datetime.combine(day, time(16, 0), tzinfo=ET))
         stamps.append(datetime.combine(day, time(16, 5), tzinfo=ET))
         stamps.append(datetime.combine(day - timedelta(days=1), time(15, 0), tzinfo=ET))
     idx = pd.DatetimeIndex(stamps).tz_convert("UTC")
@@ -55,6 +56,7 @@ def _minute_bars(
         base = 100.0
         close = [base + i * 0.01 for i in range(n)]
         if extra_after_close:
+            close[-3] = 777.0  # 16:00 那一根：收盘那一刻开始的 bar，已不属于常规时段
             close[-2] = 999.0  # 16:05 那一根：盘后，不该是收盘价
             close[-1] = 1.0  # 前一天那一根
         cols[("Open", s)] = [c - 0.5 for c in close]
@@ -92,6 +94,8 @@ class TestIntradayFrame:
         raw = _minute_bars(["AAA"], DAY)
         out = intraday_frame(["AAA"], _session(DAY), download=lambda *a, **k: raw)
         assert out.iloc[0]["close"] != 999.0, "16:05 是盘后"
+        assert out.iloc[0]["close"] != 777.0, "16:00 那根不是 15:59 那根"
+        assert out.iloc[0]["high"] < 777.0
         assert out.iloc[0]["high"] < 999.0
         assert out.iloc[0]["low"] > 1.0, "前一天那根混进来了"
 
@@ -105,6 +109,14 @@ class TestIntradayFrame:
         raw = _minute_bars(["AAA"], DAY, last=time(12, 59), extra_after_close=False)
         out = intraday_frame(["AAA"], _session(DAY, half=True), download=lambda *a, **k: raw)
         assert len(out) == 1
+
+    def test_single_level_columns_for_several_symbols_give_nothing(self) -> None:
+        """单级列只可能属于一个 ticker。拿它给 17 只都拼一行，就是把一个价格写成 17 只的收盘价。"""
+        raw = _minute_bars(["AAA"], DAY).xs("AAA", axis=1, level=1)
+        out = intraday_frame(["AAA", "BBB"], _session(DAY), download=lambda *a, **k: raw)
+        assert out.empty
+        one = intraday_frame(["AAA"], _session(DAY), download=lambda *a, **k: raw)
+        assert len(one) == 1, "只有一个标的时单级列就是它的"
 
     def test_an_all_nan_symbol_is_dropped_not_written(self) -> None:
         raw = _minute_bars(["AAA", "BBB"], DAY)
@@ -144,6 +156,88 @@ class TestFlippingThePreliminaryFlagIsAChange:
             [{**row, "preliminary": False}], {("AAA", DAY): {**row, "preliminary": False}}
         )
         assert d.n_changed == 0
+
+
+class _RecCursor:
+    """记下 SQL、按脚本吐回行 —— 让三个新查询的谓词与解析可被断言。"""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.rows, self.sql = rows, ""
+        self.many: list[Any] = []
+
+    def execute(self, sql: Any, params: Any = None) -> None:
+        self.sql = str(sql)
+
+    def executemany(self, sql: Any, seq: Any) -> None:
+        self.sql, self.many = str(sql), list(seq)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self.rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self.rows[0] if self.rows else None
+
+    def __enter__(self) -> _RecCursor:
+        return self
+
+    def __exit__(self, *a: Any) -> None:
+        return None
+
+
+class _RecConn:
+    def __init__(self, rows: list[tuple[Any, ...]] | None = None) -> None:
+        self.cur = _RecCursor(rows or [])
+
+    def cursor(self) -> _RecCursor:
+        return self.cur
+
+
+class TestTheNewQueries:
+    def test_final_rows_counts_only_final_rows(self) -> None:
+        from pipeline.run_daily import _final_rows
+
+        conn = _RecConn([(16,)])
+        assert _final_rows(conn, ["A"], DAY) == 16  # type: ignore[arg-type]
+        assert "not preliminary" in conn.cur.sql
+
+    def test_preliminary_rows_reads_only_preliminary_rows(self) -> None:
+        from pipeline.run_daily import _preliminary_rows
+
+        row = ("A", DAY, 1.0, 2.0, 0.5, 1.5, 1.5, 10, "yfinance")
+        conn = _RecConn([row])
+        out = _preliminary_rows(conn, ["A"], DAY, DAY)  # type: ignore[arg-type]
+        assert "where preliminary" in conn.cur.sql
+        assert out == [
+            {
+                "symbol": "A",
+                "date": DAY,
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "adj_close": 1.5,
+                "volume": 10,
+                "source": "yfinance",
+            }
+        ]
+
+    def test_existing_prices_carries_the_flag(self) -> None:
+        """没有它，`_same_price` 比的是 None 对 None —— 临时 → 定稿同价时永远不写。"""
+        from pipeline.run_daily import _existing_prices
+
+        conn = _RecConn([("A", DAY, 1.5, 1.5, "yfinance", True)])
+        out = _existing_prices(conn, ["A"], DAY, DAY)  # type: ignore[arg-type]
+        assert out[("A", DAY)]["preliminary"] is True
+
+    def test_upsert_prices_defaults_to_final_and_keeps_true(self) -> None:
+        from pipeline.store import PRICE_WRITE_COLUMNS, upsert_prices
+
+        base = {"symbol": "A", "date": DAY, "close": 1.0, "adj_close": 1.0, "source": "yfinance"}
+        flagged = {**base, "date": DAY - timedelta(days=1), "preliminary": True}
+        conn = _RecConn()
+        upsert_prices(conn, [base, flagged])  # type: ignore[arg-type]
+        i = PRICE_WRITE_COLUMNS.index("preliminary")
+        assert [t[i] for t in conn.cur.many] == [False, True]
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +397,66 @@ class TestTheProvisionalRun:
         assert report.status == "ok"
         assert not any(r["preliminary"] for r in _prices_written(calls))
 
+    def test_the_final_settle_moment_itself_is_final(self, harness: Any) -> None:
+        """边界归定稿那一侧：21:30 ET 整点那一跑拿到的日线就是定稿。"""
+        _, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        _wire(
+            rd, monkeypatch, sessions, _frame(symbols, [s.date for s in sessions]), symbols=symbols
+        )
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(21, 30), tzinfo=ET))
+        assert report.status == "ok"
+
+    def test_a_preliminary_row_at_the_same_price_is_rewritten_as_final(self, harness: Any) -> None:
+        """端到端版的 `_same_price`：库里是临时值、价格一分不差，这一跑必须照样写。"""
+        calls, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        frame = _frame(symbols, [s.date for s in sessions])
+        existing = {
+            (r["symbol"], r["date"]): {
+                "close": r["close"],
+                "adj_close": r["adj_close"],
+                "source": "yfinance",
+                "preliminary": r["date"] == today,
+            }
+            for r in frame.to_dict("records")
+        }
+        _wire(rd, monkeypatch, sessions, frame, symbols=symbols)
+        monkeypatch.setattr(rd, "_existing_prices", lambda *a, **k: existing)
+        rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
+        written = _prices_written(calls)
+        assert {r["date"] for r in written} == {today}, "只有今天那 17 行变了（标记翻了）"
+        assert len(written) == len(symbols)
+        assert all(r["preliminary"] is False for r in written)
+
+    def test_a_real_big_move_earlier_in_the_window_does_not_block_the_minute_row(
+        self, harness: Any
+    ) -> None:
+        """闸门 4 只比「前一根 + 这一根」：窗口里早先一次真实的大波动不该挡住它。"""
+        calls, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        days = [s.date for s in sessions]
+        frame = _frame(symbols, days[:-1])
+        jumper = symbols[3]
+        early = frame["date"] < days[10]
+        frame.loc[(frame["symbol"] == jumper) & early, ["close", "adj_close"]] = 40.0
+        _wire(
+            rd,
+            monkeypatch,
+            sessions,
+            frame,
+            symbols=symbols,
+            intraday=_intraday_rows(symbols, today, price=105.9),
+        )
+        rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(17, 5), tzinfo=ET))
+        assert jumper in {r["symbol"] for r in _prices_written(calls) if r["date"] == today}
+
     def test_after_final_settle_a_missing_daily_bar_is_filled_from_minutes(
         self, harness: Any
     ) -> None:
@@ -455,6 +609,39 @@ class TestTheFinalizeRun:
         assert report.status == "stale_vendor"
         assert report.exit_code == 1
 
+    def test_a_finalize_run_that_gets_nothing_keeps_last_nights_value(self, harness: Any) -> None:
+        """周六早上：x 的周五日线还没来、分钟线也没有。沿用库里那行临时值，**不要**把它写成
+        NULL、把它从周五的榜单里剔掉 —— 那比前一晚的临时结果还差。"""
+        calls, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        friday = sessions[-1].date
+        days = [s.date for s in sessions]
+        x = symbols[4]
+        frame = pd.concat(
+            [_frame([s for s in symbols if s != x], days), _frame([x], days[:-1])],
+            ignore_index=True,
+        )
+        _wire(rd, monkeypatch, sessions, frame, symbols=symbols)
+        monkeypatch.setattr(rd, "_final_rows", lambda conn, syms, day: len(syms) - 1)
+        row = {
+            "symbol": x,
+            "date": friday,
+            "close": 105.9,
+            "adj_close": 105.9,
+            "source": "yfinance",
+        }
+        monkeypatch.setattr(rd, "_preliminary_rows", lambda *a, **k: [row])
+        report = rd.run_once(
+            FakeConn(), cfg, now=datetime.combine(friday + timedelta(days=1), time(9, 0), tzinfo=ET)
+        )
+        assert report.status == "ok_preliminary", "还在等，不是故障；告警留给下一个交易日"
+        assert report.exit_code == 0
+        assert "沿用库里的临时值" in report.message
+        assert "bar 落后" not in report.message
+        mine = [r for r in _prices_written(calls) if r["symbol"] == x and r["date"] == friday]
+        assert mine and all(r["preliminary"] is True for r in mine)
+
     def test_force_before_the_open_targets_yesterday(self, harness: Any) -> None:
         """M12 记进 BACKLOG 的那条：早上手动补昨天，曾经挑到的是今天。"""
         _, monkeypatch, rd = harness
@@ -482,7 +669,7 @@ class TestYesterdayStillPreliminary:
     """下一个交易日收盘 +60 分钟，前一天仍拿不到正式价 → 保留临时值并告警。"""
 
     def test_it_keeps_the_preliminary_row_and_alerts(self, harness: Any) -> None:
-        _calls, monkeypatch, rd = harness
+        calls, monkeypatch, rd = harness
         cfg, symbols, _ = _cfg_symbols()
         sessions = _sessions(60)
         today, yesterday = sessions[-1].date, sessions[-2].date
@@ -515,6 +702,91 @@ class TestYesterdayStillPreliminary:
         assert report.exit_code == 1
         assert f"{x}@{yesterday}" in report.message
         assert "窗口内有空洞" not in report.message, "保留下来的临时值填住了那一天"
+        kept = [r for r in _prices_written(calls) if r["symbol"] == x and r["date"] == yesterday]
+        assert kept, "那一天必须原样写回（它在库里，diff 之后才会跳过）"
+        assert all(r["preliminary"] is True for r in kept), (
+            "**这是整条原则的底线**：保留下来的是临时值，绝不能被当成定稿写回去"
+        )
+
+    def test_a_stooq_window_does_not_get_a_yahoo_row_spliced_in(self, harness: Any) -> None:
+        """规则 1：x 的窗口已经整窗换成 Stooq，就不能再把库里那行 Yahoo 临时值拼进去。"""
+        calls, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        today, yesterday = sessions[-1].date, sessions[-2].date
+        days = [s.date for s in sessions]
+        x = symbols[2]
+        frame = pd.concat(
+            [
+                _frame([s for s in symbols if s != x], days),
+                _frame([x], [d for d in days if d != yesterday]).assign(source="stooq"),
+            ],
+            ignore_index=True,
+        )
+        _wire(
+            rd,
+            monkeypatch,
+            sessions,
+            frame,
+            symbols=symbols,
+            source={**dict.fromkeys(symbols, "yfinance"), x: "stooq"},
+        )
+        row = {"symbol": x, "date": yesterday, "close": 1.0, "adj_close": 1.0, "source": "yfinance"}
+        monkeypatch.setattr(rd, "_preliminary_rows", lambda *a, **k: [row])
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
+        assert "保留临时值" not in report.message
+        assert not [
+            r for r in _prices_written(calls) if r["symbol"] == x and r["date"] == yesterday
+        ]
+
+    def test_a_day_the_calendar_no_longer_has_is_not_kept(self, harness: Any) -> None:
+        """历史修订删掉的那一天：带回来就违反 §9.1.4 第 4 条，而且会让它永远 partial。"""
+        calls, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        gone = sessions[-1].date - timedelta(days=6)  # 上周六：不在日历里
+        assert gone not in {s.date for s in sessions}
+        _wire(
+            rd, monkeypatch, sessions, _frame(symbols, [s.date for s in sessions]), symbols=symbols
+        )
+        row = {
+            "symbol": symbols[0],
+            "date": gone,
+            "close": 1.0,
+            "adj_close": 1.0,
+            "source": "yfinance",
+        }
+        monkeypatch.setattr(rd, "_preliminary_rows", lambda *a, **k: [row])
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
+        assert report.status == "ok"
+        assert not [r for r in _prices_written(calls) if r["date"] == gone]
+
+    def test_todays_own_preliminary_row_is_not_a_past_day_to_finalize(self, harness: Any) -> None:
+        """`pending` 只收 **session 之前**的日子。今天那行是这一跑自己要写的，不是兜底对象。"""
+        _, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        seen: dict[str, Any] = {}
+        _wire(
+            rd,
+            monkeypatch,
+            sessions,
+            _frame(symbols, [s.date for s in sessions]),
+            symbols=symbols,
+            seen=seen,
+        )
+        row = {
+            "symbol": symbols[0],
+            "date": today,
+            "close": 1.0,
+            "adj_close": 1.0,
+            "source": "yfinance",
+        }
+        monkeypatch.setattr(rd, "_preliminary_rows", lambda *a, **k: [row])
+        rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
+        assert seen["require"] == {}
 
     def test_once_yahoo_has_it_the_row_is_finalized(self, harness: Any) -> None:
         calls, monkeypatch, rd = harness
@@ -590,9 +862,38 @@ class TestTheMigration:
     def test_0003_guards_final_rows_in_the_database(self) -> None:
         from pipeline.schema import MIGRATIONS_DIR
 
-        sql = (MIGRATIONS_DIR / "0003_preliminary.sql").read_text(encoding="utf-8")
+        raw = (MIGRATIONS_DIR / "0003_preliminary.sql").read_text(encoding="utf-8")
+        assert raw.lstrip().splitlines()[0].startswith("--")
+        # **去掉注释再断言。** 文件头的说明里就写着 `set search_path = ''` 和触发器的样子，
+        # 对原文断言会在散文上命中（变异测试实测：删掉真正那一行，测试照样绿）。
+        sql = "\n".join(ln.split("--", 1)[0] for ln in raw.splitlines())
         assert "before update on prices_daily" in sql
         assert "if not old.preliminary and new.preliminary then" in sql
         assert "'ok_preliminary'" in sql
-        assert sql.lstrip().splitlines()[0].startswith("--")
         assert "begin;" in sql and "commit;" in sql
+        assert "set search_path = ''" in sql
+
+    def test_the_invariant_only_tolerates_the_latest_day(self) -> None:
+        from pipeline.schema import MIGRATIONS_DIR
+
+        inv = (MIGRATIONS_DIR.parent / "invariants.sql").read_text(encoding="utf-8")
+        assert "where preliminary\n  and date < (select max(date) from prices_daily)" in inv
+        assert "t_prices_keep_final" in inv
+        assert "tgname < 't_prices_touch'" in inv
+
+
+class TestTheConfigOrdering:
+    def test_final_settle_before_settle_is_rejected(self) -> None:
+        import yaml
+        from pydantic import ValidationError
+
+        from pipeline.config import AppConfig, ConfigError
+        from pipeline.schema import MIGRATIONS_DIR
+
+        raw = yaml.safe_load(
+            (MIGRATIONS_DIR.parent.parent / "config" / "app.yaml").read_text(encoding="utf-8")
+        )
+        AppConfig.model_validate(raw)  # 现状是合法的
+        raw["final_settle_minutes"] = raw["settle_minutes"] - 1
+        with pytest.raises((ConfigError, ValidationError), match="定稿"):
+            AppConfig.model_validate(raw)

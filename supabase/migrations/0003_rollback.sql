@@ -8,6 +8,11 @@
 --     update private.runs set status = 'ok' where status = 'ok_preliminary';
 -- 同理，删列会丢掉「哪些行是临时值」这条信息 —— 回滚前先看一眼：
 --     select date, count(*) from prices_daily where preliminary group by 1;
+-- **不是零就先别回滚。** 删列之后它们在旧代码眼里就是定稿，而旧版 `_same_price`
+-- 不比较这个标记 —— 价格恰好相同的那几行永远不会被重写，临时值就此成为历史。
+-- 先等它们被定稿（当晚 / 次日早上的定稿跑），或手动 dispatch 一次 daily 再看。
+--
+-- 顺序：**先撤 M13 的代码，再跑本文件。** 新代码还在线时回滚，前端会 500、管道会 failed。
 
 begin;
 
