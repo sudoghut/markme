@@ -642,6 +642,103 @@ class TestTheFinalizeRun:
         mine = [r for r in _prices_written(calls) if r["symbol"] == x and r["date"] == friday]
         assert mine and all(r["preliminary"] is True for r in mine)
 
+    @staticmethod
+    def _reuse_case(
+        harness: Any, *, now: datetime, x_source: str = "yfinance", minutes: bool = False
+    ) -> tuple[Any, ...]:
+        calls, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        friday = sessions[-1].date
+        days = [s.date for s in sessions]
+        x = symbols[4]
+        frame = pd.concat(
+            [_frame([s for s in symbols if s != x], days), _frame([x], days[:-1])],
+            ignore_index=True,
+        )
+        if x_source == "stooq":
+            frame.loc[frame["symbol"] == x, "source"] = "stooq"
+        _wire(
+            rd,
+            monkeypatch,
+            sessions,
+            frame,
+            symbols=symbols,
+            source={**dict.fromkeys(symbols, "yfinance"), x: x_source},
+            intraday=_intraday_rows([x], friday) if minutes else None,
+        )
+        monkeypatch.setattr(rd, "_final_rows", lambda conn, syms, day: len(syms) - 1)
+        row = {
+            "symbol": x,
+            "date": friday,
+            "close": 105.9,
+            "adj_close": 105.9,
+            "source": "yfinance",
+        }
+        monkeypatch.setattr(rd, "_preliminary_rows", lambda *a, **k: [row])
+        report = rd.run_once(FakeConn(), cfg, now=now)
+        return report, calls, x, friday
+
+    def test_the_same_day_cannot_reuse_its_way_out_of_an_alert(self, harness: Any) -> None:
+        """当天 23:30（截止之后）x 还是什么都没有：那是真故障，沿用不能把它静音。"""
+        sessions = _sessions(60)
+        report, _, _, _ = self._reuse_case(
+            harness, now=datetime.combine(sessions[-1].date, time(23, 30), tzinfo=ET)
+        )
+        assert "沿用库里的临时值" not in report.message
+        assert report.exit_code == 1
+
+    def test_a_stooq_window_does_not_reuse_a_yahoo_row(self, harness: Any) -> None:
+        """规则 1：x 的窗口是 Stooq，就不能把库里那行 Yahoo 临时值拼进去。"""
+        sessions = _sessions(60)
+        report, calls, x, friday = self._reuse_case(
+            harness,
+            now=datetime.combine(sessions[-1].date + timedelta(days=1), time(9, 0), tzinfo=ET),
+            x_source="stooq",
+        )
+        assert "沿用库里的临时值" not in report.message
+        assert not [r for r in _prices_written(calls) if r["symbol"] == x and r["date"] == friday]
+
+    def test_a_reused_row_is_written_once(self, harness: Any) -> None:
+        """同一个 (symbol, date) 在一条 upsert 里出现两次，Postgres 会让整个 T2 失败。
+
+        要让它真的可能重复：分钟线已经给出了那一行，库里又挂着同一天的临时值。
+        """
+        sessions = _sessions(60)
+        report, calls, _, _ = self._reuse_case(
+            harness,
+            now=datetime.combine(sessions[-1].date + timedelta(days=1), time(9, 0), tzinfo=ET),
+            minutes=True,
+        )
+        assert "沿用库里的临时值" not in report.message, "分钟线有了就用新的，不沿用旧的"
+        keys = [(r["symbol"], r["date"]) for r in _prices_written(calls)]
+        assert len(keys) == len(set(keys))
+
+    def test_past_days_are_not_reused_they_alert(self, harness: Any) -> None:
+        """沿用只认 session 那一天。更早的临时值必须走「保留 + partial」，不能被沿用静音。"""
+        _, monkeypatch, rd = harness
+        cfg, symbols, _ = _cfg_symbols()
+        sessions = _sessions(60)
+        friday, thursday = sessions[-1].date, sessions[-2].date
+        days = [s.date for s in sessions]
+        x = symbols[4]
+        frame = pd.concat(
+            [
+                _frame([s for s in symbols if s != x], days),
+                _frame([x], [d for d in days if d != thursday]),
+            ],
+            ignore_index=True,
+        )
+        _wire(rd, monkeypatch, sessions, frame, symbols=symbols)
+        monkeypatch.setattr(rd, "_final_rows", lambda conn, syms, day: 0)
+        row = {"symbol": x, "date": thursday, "close": 1.0, "adj_close": 1.0, "source": "yfinance"}
+        monkeypatch.setattr(rd, "_preliminary_rows", lambda *a, **k: [row])
+        report = rd.run_once(
+            FakeConn(), cfg, now=datetime.combine(friday + timedelta(days=1), time(9, 0), tzinfo=ET)
+        )
+        assert "沿用库里的临时值" not in report.message
+        assert report.status == "partial" and report.exit_code == 1
+
     def test_force_before_the_open_targets_yesterday(self, harness: Any) -> None:
         """M12 记进 BACKLOG 的那条：早上手动补昨天，曾经挑到的是今天。"""
         _, monkeypatch, rd = harness
@@ -880,6 +977,10 @@ class TestTheMigration:
         assert "where preliminary\n  and date < (select max(date) from prices_daily)" in inv
         assert "t_prices_keep_final" in inv
         assert "tgname < 't_prices_touch'" in inv
+        assert "and date in (select date from trading_sessions)" in inv, "日历过滤"
+        assert "and t.tgenabled in ('O', 'A')" in inv, "禁用 / replica-only 不算挂上"
+        assert "and (t.tgtype & 2) = 2" in inv, "必须是 BEFORE（AFTER 跳不掉那一行）"
+        assert "symbol in (select symbol from symbols where enabled)" in inv
 
 
 class TestTheConfigOrdering:
