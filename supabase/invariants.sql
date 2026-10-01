@@ -282,7 +282,9 @@ select symbol || ' ' || date::text as violation
 from prices_daily
 where preliminary
   and date < (select max(date) from prices_daily)
-  and date in (select date from trading_sessions);
+  and date in (select date from trading_sessions)
+  -- 停用的标的管道不再抓，它留下的临时行没人会去定稿；那是停用的代价，不是这条要抓的。
+  and symbol in (select symbol from symbols where enabled);
 
 -- name: 定稿行不被临时行覆盖的触发器必须挂对
 --
@@ -290,7 +292,8 @@ where preliminary
 -- 被禁用、建成了 after update，或者名字排到了 t_prices_touch 之后，所有自动化
 -- 都照样是绿的 —— 而定稿行可以被临时行覆盖（闸门 A 第 1 轮 S2）。
 -- 查 pg_catalog，与执行角色无关（见文件头）。
--- tgtype 位：1 = ROW，2 = BEFORE，16 = UPDATE。tgenabled 'D' = 禁用。
+-- tgtype 位：1 = ROW，2 = BEFORE，16 = UPDATE。tgenabled 只认 'O'（origin）/ 'A'（always）：
+-- 'D' 是禁用，'R' 只在 replica 模式下触发 —— 两者在正常会话里都等于没挂。
 select 'keep_final_prices 触发器缺失或不对' as violation
 where not exists (
   select 1
@@ -299,7 +302,7 @@ where not exists (
   where t.tgrelid = 'public.prices_daily'::regclass
     and t.tgname = 't_prices_keep_final'
     and p.proname = 'keep_final_prices'
-    and t.tgenabled <> 'D'
+    and t.tgenabled in ('O', 'A')
     and (t.tgtype & 1) = 1
     and (t.tgtype & 2) = 2
     and (t.tgtype & 16) = 16
