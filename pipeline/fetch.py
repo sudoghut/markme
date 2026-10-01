@@ -228,6 +228,11 @@ def intraday_frame(
     close_at = datetime.combine(day, session.close_et, tzinfo=ET)
     in_session = (et.date == day) & (et < pd.Timestamp(close_at))
 
+    if raw.columns.nlevels != 2 and len(symbols) > 1:
+        # 单级列只可能属于**一个** ticker。多个标的时拿它给每一只都拼一行，
+        # 就是把同一个价格写成 17 只的收盘价。认不出归属就一行都不出。
+        return _empty_frame()
+
     rows: list[dict[str, object]] = []
     for sym in symbols:
         try:

@@ -275,10 +275,36 @@ where date < (select max(date) from metrics_daily)
 -- 违规的那一刻，管道自己已经告过一次警了（下一个交易日的临时跑记 partial：
 -- 「正式收盘价仍未拿到，保留临时值」）。这条是给「那条告警被看漏了」留的
 -- 第二道：它挂在 keepalive 上，每天都会再响一次，直到那一行被定稿。
+--
+-- 只看日历里还在的日子：历史修订删掉的那一天，价格行按 §9.1.4 第 3 条第 2 步可以
+-- 留着不管（writer 也没有 DELETE 权限），它若恰好是临时行，不该让这条永远红着。
 select symbol || ' ' || date::text as violation
 from prices_daily
 where preliminary
-  and date < (select max(date) from prices_daily);
+  and date < (select max(date) from prices_daily)
+  and date in (select date from trading_sessions);
+
+-- name: 定稿行不被临时行覆盖的触发器必须挂对
+--
+-- 0003 的 keep_final_prices 是 M13 那条底线在库里的唯一执行者。它若没挂上、
+-- 被禁用、建成了 after update，或者名字排到了 t_prices_touch 之后，所有自动化
+-- 都照样是绿的 —— 而定稿行可以被临时行覆盖（闸门 A 第 1 轮 S2）。
+-- 查 pg_catalog，与执行角色无关（见文件头）。
+-- tgtype 位：1 = ROW，2 = BEFORE，16 = UPDATE。tgenabled 'D' = 禁用。
+select 'keep_final_prices 触发器缺失或不对' as violation
+where not exists (
+  select 1
+  from pg_trigger t
+  join pg_proc p on p.oid = t.tgfoid
+  where t.tgrelid = 'public.prices_daily'::regclass
+    and t.tgname = 't_prices_keep_final'
+    and p.proname = 'keep_final_prices'
+    and t.tgenabled <> 'D'
+    and (t.tgtype & 1) = 1
+    and (t.tgtype & 2) = 2
+    and (t.tgtype & 16) = 16
+    and t.tgname < 't_prices_touch'
+);
 
 -- name: 最新一天的榜单行数必须等于排名池大小
 --

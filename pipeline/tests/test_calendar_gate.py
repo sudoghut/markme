@@ -253,5 +253,5 @@ class TestLastSettledSession:
 
     def test_it_raises_rather_than_inventing_a_session(self) -> None:
         """一个都没定稿时**抛**，不要返回一个编出来的日期。"""
-        with pytest.raises(ValueError, match="没有任何已定稿"):
+        with pytest.raises(ValueError, match="没有任何已过闸门 2"):
             last_settled_session(self.SESSIONS, _et("2024-06-11", 9, 0), SETTLE)

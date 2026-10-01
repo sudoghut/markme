@@ -194,3 +194,21 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   （连同 `vendor_grace` 限定为「session 就是今天」）；「跨午夜 → 永久丢失」措辞
   （现在是「转为定稿跑」）；闸门 A 第 7 轮的四条文案项（§10.5 → §10.6 错号、闸门 3 那条
   的截止后状态、测试 docstring 引旧表、「三处」→「四处」）。
+
+## M13 留下的
+
+- **早上的定稿跑会反复重跑「缺行」的日子。** 判据是 `_final_rows < 全池`，所以某天有一只
+  两个源都没给（或被闸门 4 剔除、或降级 Stooq 而 Stooq 晚一天）时，两条早上 cron 每天
+  （含周末）都会整窗重抓并 exit 1 —— 告警重复，也多了几次「限流 → 整窗降级 Stooq」的机会。
+  不静默，下一次好跑就自愈。若嫌吵：判据收窄为「库里该日有 `preliminary` 行」。
+- **`ok_preliminary` 盖住 `ok_events_stale` 时，`invariants.sql`「ok_events_stale 的那一跑
+  不得发布事件倒计时」看不到这一跑。** 代码照样把事件列写 NULL，不会出错数据，只是少一道探测。
+- **`_same_price` 不比 `open` / `volume`。** 21:30 定稿到 ~22:15 结算之间写下的定稿行，
+  `Open` / `Volume` 可能还没定（M12 实测 Open 会变）。两者都不进指标与前端。
+- **`run_invariants` 在某条断言报错后不 rollback**（pre-existing）：连接是 autocommit=False，
+  后面每一条都报「current transaction is aborted」，一条真错埋在一串假违规里。
+- **早上两跑 exit 0 也会 ping dead-man**，于是「晚间几跑全没触发」会被早上的 ping 盖住；
+  「管道不得静默停摆」那条不变式仍会抓到，只是晚一天。
+- `_tidy_yfinance` 不裁 `end` 之后的日期。定稿跑现在常在盘中跑，而 yfinance 的 `end`
+  是开区间，所以目前只是防御性的缺口。
+- 分钟线的 `in_session` 没有开盘下界，靠 `prepost=False` 保证不混进盘前。
