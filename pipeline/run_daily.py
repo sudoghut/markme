@@ -12,9 +12,9 @@
 未到收盘 + settle_minutes     ``skipped_too_early`` 0          否
 本日已有 ok（条件重试跳过）    ``skipped_already_done`` 0       否
 仅事件抓取失败（§3.5(4)）     ``ok_events_stale``   **0**      **否**
-基准 bar 落后（早于 ``vendor_deadline_et``）``stale_vendor``  **0**  **否**
-基准 bar 落后（已到 ``vendor_deadline_et``）``stale_vendor``  1      是
-部分标的落后 / 脏数据 / 降级   ``partial``           1          是
+任一 bar 落后（早于 ``vendor_deadline_et``）``stale_vendor``  **0**  **否**
+全员/基准落后（已到截止）     ``stale_vendor``      1          是
+非基准落后（已到截止）/ 脏数据 / 降级 ``partial``     1          是
 计算 / 写库异常               ``failed``            1          是
 ===========================  ====================  =========  ========
 
@@ -120,9 +120,9 @@ class RunReport:
         **``partial`` 排在 ``stale_vendor`` 之上，这一条是 M12 用一个 bug 换来的。**
         两者曾经同为 rank 2（那时无所谓：都 exit 1）。M12 让 ``stale_vendor``
         在截止时刻之前 exit 0 之后，同 rank 就变成了一个**静音器**：
-        「基准落后」那一支不 return、会继续往下走，一旦它先把状态锁成
-        ``stale_vendor``，下游三处 ``escalate("partial")``（窗口内有空洞 /
-        事件预算耗尽 / 非预热区算不出横截面）全部变成空操作，
+        「有标的落后」那一支不 return、会继续往下走，一旦它先把状态锁成
+        ``stale_vendor``，下游四处 ``escalate("partial")``（窗口内有空洞 /
+        事件预算耗尽 / 非预热区算不出横截面 / 重验证失败）全部变成空操作，
         **而那一跑照样写库、照样 revalidate 把结果推上线**。
         于是 §7.2 表里「partial → exit 1 → 告警」那一行，在每天都会出现的
         「基准还没结算完」状态下被整体撤销。
@@ -617,20 +617,27 @@ def run_once(
         return report
     if lagging:
         bench = cfg.universe.benchmark
+        # **这一支同样要宽限 —— 而且不只是基准。** 结算不是 17 只同时翻的：
+        # `fetch.py` 丢掉 `adj_close` 为 NaN 的半根 bar，于是「16 只已结算、
+        # 基准还没有」与它的镜像「基准已结算、某只还没有」都是结算过程中
+        # 最正常的中间态。新排期下多数情形的第一跑落在 22:00 ET，正好卡在
+        # 放行与结算之间；只给基准装宽限的话，M12 要消灭的那种每天都响的
+        # 噪音会从非基准那一侧原样漏回来（闸门 A 第 5 轮 S1）。
+        #
+        # 截止之前：任何一只落后都是「在等供应商」→ `stale_vendor` + 宽限。
+        # 截止之后：基准落后仍是 `stale_vendor`（exit 1）；
+        # 只有非基准落后则是 `partial` —— 其余照常入库，照样告警。
+        waiting = bench in lagging or vendor_grace
         # 已经是 partial 的话不要被覆盖回去（消息要留全）。
-        report.escalate("stale_vendor" if bench in lagging else "partial")
-        if bench in lagging:
-            # **这一支同样要宽限。** 结算不是 17 只同时翻的：
-            # `fetch.py` 丢掉 `adj_close` 为 NaN 的半根 bar，于是「16 只已结算、
-            # 基准还没有」是结算过程中最正常的中间态。不装宽限的话，
-            # M12 要消灭的那种每天都响的噪音会从这一支原样漏回来。
+        report.escalate("stale_vendor" if waiting else "partial")
+        if waiting:
             report.vendor_retry_pending = vendor_grace
         # **消息和退出码必须出自同一个布尔值。** 各写各的条件，变异测试里
         # 当场出现过「日志写着不告警、exit_code 却是 1」——
         # 一条说反的日志比没有日志更费事。
         report.note(
             f"bar 落后：{', '.join(lagging)}"
-            + (_grace_note(cfg, report.vendor_retry_pending) if bench in lagging else "")
+            + (_grace_note(cfg, report.vendor_retry_pending) if waiting else "")
         )
         # **只是尾部缺了一根，不是整窗都不可信 —— 所以这里什么都不丢。**
         #

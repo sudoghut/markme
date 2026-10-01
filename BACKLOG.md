@@ -165,14 +165,36 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   实测确认：60 session × 17 只 → 最左那天 `mom_20`/`rsi_14`/`ema_60`/`alpha` 全为 None。
 - **`test_calendar_gate.py` 的 `SETTLE = 60`** 是喂给被测函数的参数、不是配置拷贝，
   所以本轮没动。但它和 `config/app.yaml` 的 330 摆在一起容易被误读，值得重命名。
-- **GitHub cron 的延迟（实测 3–3.6h）是整张落点表的地基，却只有「3 小时」
-  进了测试**（`DELAYS_HOURS = (0, 3)`）。延迟一变，`daily.yml` 的散文、那张表、
-  和 `DELAYS_HOURS` 三者同时失真，而只有第三者会让 CI 红。
+- **GitHub cron 的延迟（实测 3–3.6h）是整张落点表的地基。** 落点表那 28 格只按
+  `DELAYS_HOURS = (0, 3)` 绑；截止时刻那条（`TestTheVendorDeadlineHasSomethingToLandOn`）
+  已按 15 分钟粒度扫 0–4h。延迟一变，`daily.yml` 的散文与那张表会先失真。
 - **探针是临时的，用完要删。** `.github/workflows/vendor-probe.yml`、
-  `pipeline/vendor_probe.py`、`pipeline/tests/test_vendor_probe.py`、`docs/probe/`。
+  `pipeline/vendor_probe.py`、`pipeline/tests/test_vendor_probe.py`（`docs/probe/` 只在 runner 上生成，不在仓库里）。
   跑够两周后：算「17 只全部结算完」的时刻分布 → 用它重定 `settle_minutes` 与
   `vendor_deadline_et`（现在这两个数之间只有 15 分钟余量，且建立在一天的
-  两个观测点上）→ 然后删掉上面四样。
+  两个观测点上）→ 然后删掉上面三样。
 - **`daily.yml` 的落点表只验到 4 小时延迟。** 闸门 A 第 3 轮实测：延迟 >4h 时
   开始出现单跑/零跑格（2026-03-09 延迟 5h 只剩 1 跑、6h 归零）。
   而 `0 22` 那条注释声称自己是为「>3.5h」准备的 —— 这个区间没有任何断言。
+- **闸门 A 第 5 轮的测试缺口（代码现在是对的，回归时 CI 不会红）。**
+  ① `run_daily.py` 结构性 / 意外空洞分流里「意外空洞 → `partial`」这个方向没有端到端测试
+  —— 「全部算结构性」与「`warm is None` 静音」两个变异体都活着；
+  ② 探针 `main()` 零测试 —— D1 改回 `sessions[-1]`、`MAX_SESSION_AGE` 改 30 天都不红；
+  ③ D6 的测试太松 —— `start` 只往前推 1 天、`_prior_bars` 的 `<` 改 `<=`、
+  多传一个 yfinance kwarg，三个变异体都活着。
+- **有标的落后、同时又有下游 `partial` 时，日志与退出码说反。** 消息里写着
+  「当天仍有后续跑，不告警」，`exit_code` 却是 1（`partial` 盖掉了宽限）。
+  只影响日志。修法：宽限那半句在收尾时按最终状态补，而不是在分支里当场写。
+- **截止之后能告警的跑，在若干格里只有 1 跑**（如 EDT 准时只有 `30 3`）。
+  它一条单独被 GitHub 丢掉或迟到过午夜，当天就零告警；
+  次日整窗重抓会补数据，故障持续则次日照常告警 —— 是告警推迟一天，不是丢数据。
+  枚举与测试都假设 7 条 cron 延迟相同。
+- **「跨 ET 午夜 → 当天数据永久丢失」说重了**（`daily.yml` 头部、§7.1、
+  `test_schedule_dst.py` docstring）。日常跑每次重写整窗，漏掉的那天会被次日补上，
+  实际后果是晚一天（2026-09-30 就是这么手动补回来的）。
+- **`workflow_dispatch --force` / `backfill` 在交易日放行之前会挑到今天的 session。**
+  `run_daily.py` 里 `session = gate.session or last_settled_session(...)` —— 而
+  `skipped_too_early` 分支返回的 `gate.session` 就是今天。于是「早上手动补昨天」
+  只会再报一次 `stale_vendor`、什么都不写。修复跑那一支已经钳到上一个已定稿的
+  session，这一支没有。**另开分支修。**
+- 两个 `checkout` 都没设 `persist-credentials: false`（token 只读，风险低，与其余 workflow 一致）。
