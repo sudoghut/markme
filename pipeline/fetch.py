@@ -362,6 +362,10 @@ class SanityIssue:
         return f"{self.symbol}: {self.kind} — {self.detail}"
 
 
+#: 只看一行自身就能判定的问题（M14）。日间跳变不在里面：它牵涉前一根。
+_ROW_LOCAL_ISSUES = frozenset({"ohlc 不一致", "adj_close<=0", "volume<0"})
+
+
 def check_sanity(
     df: pd.DataFrame,
     *,
@@ -483,6 +487,9 @@ class FetchOutcome:
     rejected: tuple[str, ...] = ()
     #: 跨源比对的最大相对差（§7.2 闸门 4 末条），按标的。
     cross_source_max_diff: dict[str, float] = field(default_factory=dict)
+    #: ``provisional_day`` 那一根日线还在成形、没过闸门 4，**只丢了那一行**的标的（M14）。
+    #: 不算 ``issues``：在调用方看来它们只是「当天日线还没给出」，交给分钟线补临时值。
+    half_bars: tuple[str, ...] = ()
 
     @property
     def symbols(self) -> tuple[str, ...]:
@@ -506,6 +513,7 @@ def fetch_window(
     stooq: object = None,
     corporate_action_dates: dict[str, set[date]] | None = None,
     require: Mapping[str, Collection[date]] | None = None,
+    provisional_day: date | None = None,
 ) -> FetchOutcome:
     """抓整个窗口；拿不到的标的**用备源重抓整个窗口**。
 
@@ -517,6 +525,9 @@ def fetch_window(
     yfinance 给了这个标的、却缺了其中某天时，**整窗**换 Stooq 再问一次
     （docs/provisional-close.md 的「定稿兜底」）；Stooq 也没有，就留着 yfinance
     这一份 —— 缺的那天由调用方保留临时值并告警，**不拿任何东西冒充定稿**。
+
+    ``provisional_day``：这一天的日线**可能还在成形**（调用方只在供应商宽限期内传它，
+    即「session 就是今天、还没到 ``vendor_deadline_et``」）。见下面「半根 bar」那段。
     """
     yfn = yf_frame or yfinance_frame
     stq = stooq or stooq_frame
@@ -587,6 +598,46 @@ def fetch_window(
     )
     issues = check_sanity(frame, corporate_action_dates=corporate_action_dates)
 
+    # ── 半根 bar：当天那一行还在成形，不是供应商坏了（M14）────────────────
+    #
+    # 2026-10-12 17:38 ET：ORCL 当天的日线 OHLC 自相矛盾（定稿是 O=H=141.56，
+    # 那时 Open 已经变了、High 还没跟上 —— M12 实测 Open 在 21:05→22:09 还在变）。
+    # 它走进下面的第二意见，Stooq 当晚还没有这一天，比出 NaN →「比不出来就不信」→
+    # **整窗剔除**，连带 ``per_symbol_source`` 也删了，于是调用方的分钟线回退
+    # 根本轮不到它：ORCL 当天空着，``partial``，exit 1 —— 而同一跑里另外 16 只
+    # 正是靠分钟线出的临时值。「供应商还没结算」被当成了「供应商坏了」。
+    #
+    # 所以宽限期内：**问题只出在 ``provisional_day`` 那一行**（去掉它整窗就干净）的
+    # yfinance 标的，只丢那一行 —— 等同于「日线还没给出」，交给分钟线（分钟线自己
+    # 照样要过闸门 4）。其余照旧：历史行有问题的、降级来的 Stooq 窗口，都走第二意见。
+    # 宽限期之外不传 ``provisional_day``，这一段整体不生效：那时还脏，就是真脏。
+    #
+    # **只认行内问题。** 日间跳变比的是「前一根 → 这一根」，挂在当天那行上的跳变
+    # 也可能是**昨天**那根坏了；丢掉当天那行，指向昨天的唯一证据也跟着没了，
+    # 而第二意见本来能拿 Stooq 的昨天把它比出来（闸门 A 第 1 轮 S1）。
+    # 所以有跳变的标的一律照旧走第二意见。
+    half_bars: list[str] = []
+    if provisional_day is not None:
+        for sym in sorted({i.symbol for i in issues}):
+            if per_source.get(sym) != "yfinance":
+                continue
+            if any(i.kind not in _ROW_LOCAL_ISSUES for i in issues if i.symbol == sym):
+                continue
+            g = frame[frame["symbol"] == sym]
+            rest = g[g["date"] != provisional_day]
+            # rest 为空意味着窗口里只有那一根：丢掉它这只标的就从 frame 里消失了，
+            # 而 per_symbol_source 还说它来自 yfinance —— 不走这条路。
+            if rest.empty:
+                continue
+            # 窗口里根本没有那一天时 rest 就是 g 本身，这里自然仍然不干净。
+            if check_sanity(rest, corporate_action_dates=corporate_action_dates):
+                continue
+            half_bars.append(sym)
+        if half_bars:
+            drop = frame["symbol"].isin(half_bars) & (frame["date"] == provisional_day)
+            frame = frame[~drop].reset_index(drop=True)
+            issues = [i for i in issues if i.symbol not in half_bars]
+
     # ── 闸门 4 的后半句：拿备源做第二意见，再决定写不写 ──────────────────
     #
     # §7.2 闸门 4 末条要求「两个源都有该 bar 时，做一次跨源收盘价一致性比对」。
@@ -639,6 +690,7 @@ def fetch_window(
         issues=tuple(issues),
         rejected=tuple(rejected),
         cross_source_max_diff=diffs,
+        half_bars=tuple(half_bars),
     )
 
 

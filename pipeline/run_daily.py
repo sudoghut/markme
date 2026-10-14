@@ -15,6 +15,7 @@
 任一 bar 落后（早于 ``vendor_deadline_et``）``stale_vendor``  **0**  **否**
 全员/基准落后（已到截止）     ``stale_vendor``      1          是
 非基准落后（已到截止）/ 脏数据 / 降级 ``partial``     1          是
+只有当天那根日线行内不一致（早于截止，M14） 丢那一行、按「还没给出」处理 0  否
 计算 / 写库异常               ``failed``            1          是
 ===========================  ====================  =========  ========
 
@@ -731,7 +732,16 @@ def run_once(
     for r in pending:
         require.setdefault(str(r["symbol"]), set()).add(r["date"])
     try:
-        outcome = fetch_window(symbols, start, session.date, budget, require=require)
+        outcome = fetch_window(
+            symbols,
+            start,
+            session.date,
+            budget,
+            require=require,
+            # 和 `stale_vendor` 的宽限**同一个布尔值**（M14）：「当天日线还在成形」与
+            # 「当天日线还没来」是同一件事的两个样子，宽限的边界不该是两条。
+            provisional_day=session.date if vendor_grace else None,
+        )
     except (BudgetExceeded, RetryAfterTooLong) as exc:
         # §7.3.1 对这两件事的处置都是 **partial**，不是 failed：
         # 「超出即中止并记 partial」「放弃这一跑记 partial」。
@@ -746,6 +756,12 @@ def run_once(
     if outcome.missing:
         report.escalate("partial")
         report.note(f"两个源都没拿到：{', '.join(outcome.missing)}")
+    if outcome.half_bars:
+        # 不升级状态：在这一跑看来它们只是「日线还没给出」，下面由分钟线补临时值。
+        report.note(
+            f"{session.date} 的日线还在成形、未过闸门 4，先丢掉这一根、改用分钟线："
+            + ", ".join(outcome.half_bars)
+        )
     if outcome.issues:
         report.escalate("partial")
         report.note("脏数据：" + "；".join(str(i) for i in outcome.issues[:5]))

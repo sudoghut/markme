@@ -219,3 +219,29 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   下一次好跑重算回来。沿用只认临时行；要覆盖这种情况，得把库里的定稿行也当兜底带回来。
 - `provisional-close.md` §4「沿用」那段少写了一个条件：只对窗口来自 yfinance、且库里那一行
   本身也是 yfinance 的标的成立（代码与测试已经钉住，文档没写）。
+
+## M14 留下的
+
+- **【SERIOUS，pre-existing，建议作为下一个里程碑】第二意见把 Stooq 还没有的那一天当成「一致」。**
+  `cross_source_gap` 按 `(symbol, date)` 内连接；Stooq 有历史、还没有当天（夜里的常态）时，
+  被标记的当天那行在连接里消失，`worst` 只在历史上算出 ≈0 → 放行，脏行留在 frame 里。
+  闸门 A 第 2 轮用真的 `fetch_window` 复现：当天 close=0.01、Stooq 只给 D0/D1 →
+  `rejected=()`、`cross_source_max_diff={'ORCL': 0.0}`。截止之后或次日定稿跑里，这行以
+  `preliminary=False` 写进库、进当天指标与榜单（状态是 `partial`，会告警，但毒数据照写）。
+  违反 §7.2 闸门 4「备源不同意（或拿不到）→ 剔除」。修法：被标记的日子必须都在重叠里，
+  不在就按 NaN（拿不到）处理。M14 的测试用的 Stooq 桩一律返回空，所以没撞上；修的时候要补
+  「Stooq 有历史、没有当天」的桩。2026-10-12 那晚日志是 `ORCL=nan%`，即 Stooq 一行都没给，
+  所以那一跑没有踩到这条。
+- `TestHalfBarEndToEnd._setup` 用 `a[3].sleep` 关节流，依赖 `budget` 是第 4 个位置参数。
+- `_ROW_LOCAL_ISSUES` 与 `check_sanity` 各写一份问题名字面量；改名只有变异测试能抓到。
+
+- `half_bars` 的说明只写标的名，不写被丢那一行的问题原文；若那一天以 `stale_vendor` 收尾，
+  这条说明是「一根脏行被丢过」的唯一痕迹。可以把 `SanityIssue` 文本一并带出来。
+- `run_once` 从不传 `corporate_action_dates`（pre-existing）：当天拆股 → 日线跳变 →
+  走第二意见；分钟线回退同样会被跳变挡住。只是延迟，不是错数。
+- 21:30–22:30 之间拿到的**干净**日线按 M13 记为定稿，而 M12 实测 Yahoo 22:15 前后才结算完
+  （`Open` 还在变）。一跑 `ok` 之后后续跑记 `skipped_already_done`，那根 Open 不会再被修正。
+  pre-existing M13 行为；Open 不进指标，影响面只在展示。
+- 宽限期内「当天日线行内不一致」的那一跑，以前会顺带拿 Stooq 把**整个窗口**比一遍；
+  现在不问了。这本来就不是闸门 4 的设计职责（没有当天问题的日子从来不比），所以不算回归，
+  但一个**自身没越过 50% 跳变线的**坏历史行，因此少了一次被偶然比出来的机会。

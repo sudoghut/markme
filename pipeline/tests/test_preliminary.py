@@ -18,7 +18,7 @@ import pytest
 
 from pipeline.calendar_gate import ET
 from pipeline.config import load_config
-from pipeline.fetch import FetchOutcome, fetch_window, intraday_frame
+from pipeline.fetch import FetchOutcome, check_sanity, fetch_window, intraday_frame
 from pipeline.sessions import Session
 from pipeline.store import diff_prices
 from pipeline.tests.test_run_once_behavior import (  # 复用同一套假数据；夹具在 conftest.py
@@ -1038,3 +1038,238 @@ class TestTheConfigOrdering:
         raw["final_settle_minutes"] = raw["settle_minutes"] - 1
         with pytest.raises((ConfigError, ValidationError), match="定稿"):
             AppConfig.model_validate(raw)
+
+
+# ---------------------------------------------------------------------------
+# M14：当天那根日线还在成形、没过闸门 4 —— 只丢那一行，交给分钟线
+# ---------------------------------------------------------------------------
+def _half_bar(frame: pd.DataFrame, sym: str, day: date) -> pd.DataFrame:
+    """把 ``sym`` 在 ``day`` 那一行改成 2026-10-12 ORCL 那样：Open 已经变了、High 还没跟上。"""
+    out = frame.copy()
+    hit = (out["symbol"] == sym) & (out["date"] == day)
+    assert hit.sum() == 1, "测试数据里必须真有那一行，否则下面的断言是空转"
+    close = float(out.loc[hit, "close"].iloc[0])
+    out.loc[hit, ["open", "high", "low"]] = [close + 5.0, close + 1.0, close - 1.0]
+    return out
+
+
+class TestHalfBarInFetchWindow:
+    """``fetch_window(provisional_day=...)`` 本身。"""
+
+    D0, D1, D2 = date(2026, 10, 8), date(2026, 10, 9), date(2026, 10, 12)
+
+    def _budget(self) -> RequestBudget:
+        return RequestBudget(
+            max_requests=50, interval_seconds=0, retry_max_attempts=1, sleep=lambda _s: None
+        )
+
+    def _run(
+        self, yf: pd.DataFrame, provisional_day: date | None, asked: list[str] | None = None
+    ) -> FetchOutcome:
+        def _stq(s: str, *a: Any) -> pd.DataFrame:
+            if asked is not None:
+                asked.append(s)
+            return pd.DataFrame()  # 当晚的 Stooq 还没有这一天 —— 10-12 那晚就是这样
+
+        return fetch_window(
+            sorted(set(yf["symbol"])),
+            self.D0,
+            self.D2,
+            self._budget(),
+            yf_frame=lambda *a: yf,
+            stooq=_stq,
+            provisional_day=provisional_day,
+        )
+
+    def _yf(self) -> pd.DataFrame:
+        return _half_bar(_frame(["AAA", "ORCL"], [self.D0, self.D1, self.D2]), "ORCL", self.D2)
+
+    def test_only_that_row_is_dropped(self) -> None:
+        asked: list[str] = []
+        out = self._run(self._yf(), self.D2, asked)
+        assert out.half_bars == ("ORCL",)
+        assert out.rejected == () and out.issues == (), "不是脏数据，是还没结算"
+        assert out.per_symbol_source["ORCL"] == "yfinance", "分钟线回退认的就是这个"
+        orcl = set(out.frame.loc[out.frame["symbol"] == "ORCL", "date"])
+        assert orcl == {self.D0, self.D1}, "历史行一行不少，只少当天那根"
+        assert len(out.frame[out.frame["symbol"] == "AAA"]) == 3
+        assert asked == [], "不该再去问第二意见"
+
+    def test_without_provisional_day_it_is_still_rejected(self) -> None:
+        """宽限期外不传 ``provisional_day``：那时还脏就是真脏，行为与 M13 完全一样。"""
+        out = self._run(self._yf(), None)
+        assert out.half_bars == ()
+        assert out.rejected == ("ORCL",)
+        assert "ORCL" not in set(out.frame["symbol"])
+
+    def test_a_dirty_history_row_is_not_a_half_bar(self) -> None:
+        """历史行也脏：去掉当天那根整窗仍不干净 → 照旧走第二意见、剔除。"""
+        yf = _half_bar(self._yf(), "ORCL", self.D1)
+        out = self._run(yf, self.D2)
+        assert out.half_bars == ()
+        assert out.rejected == ("ORCL",)
+
+    def test_only_a_dirty_history_row_is_not_touched(self) -> None:
+        """当天那根是干净的、脏的是历史行：丢当天那行于事无补，也不该丢。"""
+        yf = _half_bar(_frame(["AAA", "ORCL"], [self.D0, self.D1, self.D2]), "ORCL", self.D1)
+        out = self._run(yf, self.D2)
+        assert out.half_bars == ()
+        assert out.rejected == ("ORCL",)
+
+    def test_a_stooq_window_is_not_trimmed(self) -> None:
+        """降级来的 Stooq 窗口不在这条路上：分钟线本来也不会给它补行（规则 1）。"""
+        yf = _frame(["AAA"], [self.D0, self.D1, self.D2])
+        stq = _half_bar(_frame(["ORCL"], [self.D0, self.D1, self.D2]), "ORCL", self.D2).assign(
+            source="stooq"
+        )
+        out = fetch_window(
+            ["AAA", "ORCL"],
+            self.D0,
+            self.D2,
+            self._budget(),
+            yf_frame=lambda *a: yf,
+            stooq=lambda s, *a: stq if s == "ORCL" else pd.DataFrame(),
+            provisional_day=self.D2,
+        )
+        assert out.degraded == ("ORCL",), "前提：它真的是降级来的"
+        assert out.half_bars == ()
+        assert out.rejected == ("ORCL",)
+
+    def test_a_jump_on_that_day_is_not_a_half_bar(self) -> None:
+        """跳变牵涉前一根，不是行内问题：照旧走第二意见（拿不到就剔除）。"""
+        yf = _frame(["AAA", "ORCL"], [self.D0, self.D1, self.D2])
+        hit = (yf["symbol"] == "ORCL") & (yf["date"] == self.D2)
+        yf.loc[hit, ["close", "adj_close"]] = 0.01
+        asked: list[str] = []
+        out = self._run(yf, self.D2, asked)
+        assert out.half_bars == ()
+        assert asked == ["ORCL"], "要去问第二意见"
+        assert out.rejected == ("ORCL",)
+
+    def test_a_poisoned_yesterday_is_not_blamed_on_today(self) -> None:
+        """闸门 A 第 1 轮 S1：昨天那根坏了（×0.6，自身没越过 50% 的跳变线），
+        今天那根是对的 —— 跳变挂在**今天**那行上。若把它当半根 bar 丢掉今天那行，
+        指向昨天的证据就没了，而 Stooq 本来能用它的昨天把毒数据比出来。"""
+        yf = _frame(["AAA", "ORCL"], [self.D0, self.D1, self.D2])
+        orcl = yf["symbol"] == "ORCL"
+        truth = yf.loc[orcl].copy()
+        yf.loc[orcl & (yf["date"] == self.D1), ["close", "adj_close"]] *= 0.6
+        assert check_sanity(yf[orcl & (yf["date"] != self.D2)]) == [], (
+            "前提：去掉今天那行，剩下的看起来是干净的 —— 否则测不到 S1"
+        )
+        stooq = truth[truth["date"] < self.D2].assign(source="stooq", close=None)
+        out = fetch_window(
+            ["AAA", "ORCL"],
+            self.D0,
+            self.D2,
+            self._budget(),
+            yf_frame=lambda *a: yf,
+            stooq=lambda s, *a: stooq if s == "ORCL" else pd.DataFrame(),
+            provisional_day=self.D2,
+        )
+        assert out.half_bars == ()
+        assert out.rejected == ("ORCL",), "昨天那根毒数据不能进 T2"
+        assert "ORCL" not in set(out.frame["symbol"])
+
+    def test_a_window_of_only_that_day_is_not_emptied(self) -> None:
+        """只有那一根时丢掉它，这只标的就从 frame 里消失、却还挂着 yfinance 的源。"""
+        yf = _half_bar(_frame(["AAA", "ORCL"], [self.D2]), "ORCL", self.D2)
+        out = fetch_window(
+            ["AAA", "ORCL"],
+            self.D2,
+            self.D2,
+            self._budget(),
+            yf_frame=lambda *a: yf,
+            stooq=lambda *a: pd.DataFrame(),
+            provisional_day=self.D2,
+        )
+        assert out.half_bars == ()
+        assert out.rejected == ("ORCL",)
+
+
+class TestHalfBarEndToEnd:
+    """``run_once`` 用**真的** ``fetch_window``（只换掉网络），把宽限的边界钉住。
+
+    其余测试都把 ``fetch_window`` 整个换掉了 —— 那样测不到 ``run_once`` 到底有没有
+    把 ``provisional_day`` 传进去，而这条修复全部的效果都在那一个参数上。
+    """
+
+    def _setup(self, harness: Any) -> tuple[Any, ...]:
+        calls, monkeypatch, rd = harness
+        cfg, symbols, bench = _cfg_symbols()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        victim = next(s for s in symbols if s != bench)
+        yf = _half_bar(_frame(symbols, [s.date for s in sessions]), victim, today)
+        intra = _intraday_rows([victim], today, price=105.85)
+
+        _install_plan(rd, monkeypatch, sessions, _no_revision())
+        seen: dict[str, Any] = {}
+
+        def _fw(*a: Any, **k: Any) -> FetchOutcome:
+            seen["provisional_day"] = k.get("provisional_day")
+            a[3].sleep = lambda _s: None  # 别真的按 2 秒节流
+            return fetch_window(*a, **k, yf_frame=lambda *x: yf, stooq=lambda *x: pd.DataFrame())
+
+        monkeypatch.setattr(rd, "fetch_window", _fw)
+        monkeypatch.setattr(rd, "intraday_frame", lambda syms, session, **k: intra)
+        return calls, rd, cfg, symbols, today, victim, seen
+
+    def test_a_half_bar_before_the_deadline_falls_back_to_minutes(self, harness: Any) -> None:
+        """2026-10-12 17:38 ET 那一跑：现在应当是 ok_preliminary，ORCL 用分钟线出临时值。"""
+        calls, rd, cfg, symbols, today, victim, seen = self._setup(harness)
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(17, 38), tzinfo=ET))
+        assert seen["provisional_day"] == today
+        assert report.status == "ok_preliminary", report.message
+        assert report.exit_code == 0
+        rows = {r["symbol"]: r for r in _prices_written(calls) if r["date"] == today}
+        assert set(rows) == set(symbols), "17 只当天都有值"
+        assert rows[victim]["preliminary"] is True
+        assert rows[victim]["close"] == pytest.approx(105.85), "取的是分钟线，不是那根半截日线"
+        assert "还在成形" in report.message
+
+    def test_between_final_settle_and_the_deadline_it_still_falls_back(self, harness: Any) -> None:
+        """边界跟的是 ``vendor_deadline_et``（22:30），不是 ``final_settle_minutes``（21:30）：
+        定稿时刻只决定**干净的**日线算不算定稿；没过闸门 4 的那根，
+        当天还有后续跑之前按「还没给出」办。"""
+        calls, rd, cfg, _symbols, today, victim, seen = self._setup(harness)
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 0), tzinfo=ET))
+        assert seen["provisional_day"] == today
+        assert report.status == "ok_preliminary", report.message
+        pre = {
+            r["symbol"] for r in _prices_written(calls) if r["date"] == today and r["preliminary"]
+        }
+        assert pre == {victim}, "其余 16 只已过定稿时刻，是定稿"
+
+    def test_no_minute_bar_either_means_waiting_not_alerting(self, harness: Any) -> None:
+        """丢了那一行、分钟线也没来：它就是「当天还没给出」，宽限期内 stale_vendor、不告警。"""
+        calls, rd, cfg, _symbols, today, victim, _ = self._setup(harness)
+        harness[1].setattr(rd, "intraday_frame", lambda syms, session, **k: pd.DataFrame())
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(17, 38), tzinfo=ET))
+        assert report.status == "stale_vendor", report.message
+        assert report.exit_code == 0
+        written = {r["symbol"] for r in _prices_written(calls) if r["date"] == today}
+        assert victim not in written
+
+    def test_after_the_deadline_a_dirty_bar_still_alerts(self, harness: Any) -> None:
+        """22:30 之后当天没有补救机会了：还脏就是真脏，照旧 partial、不写毒数据。"""
+        calls, rd, cfg, _symbols, today, victim, seen = self._setup(harness)
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 45), tzinfo=ET))
+        assert seen["provisional_day"] is None
+        assert report.status == "partial"
+        assert report.exit_code == 1
+        written = {r["symbol"] for r in _prices_written(calls) if r["date"] == today}
+        assert victim not in written
+
+    def test_a_finalize_run_is_not_graced(self, harness: Any) -> None:
+        """次日早上的定稿跑拿的是过去的 session：那根还脏，就该告警。"""
+        _calls, rd, cfg, _symbols, today, _victim, seen = self._setup(harness)
+        # 库里那一天还没有全员定稿 —— 否则次日早上这一跑根本不会钳回去。
+        harness[1].setattr(rd, "_final_rows", lambda conn, syms, day: 0)
+        report = rd.run_once(
+            FakeConn(), cfg, now=datetime.combine(today + timedelta(days=1), time(9, 0), tzinfo=ET)
+        )
+        assert report.session_date == today
+        assert seen["provisional_day"] is None
+        assert report.status == "partial"
+        assert report.exit_code == 1
