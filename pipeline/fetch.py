@@ -357,6 +357,9 @@ class SanityIssue:
     symbol: str
     kind: str
     detail: str
+    #: 这条问题牵涉的**所有**日子（M15）。第二意见必须把它们每一天都比到，
+    #: 否则就是「比不出来」。跳变牵涉一对：前一天和被记下的那一天都在里面。
+    dates: tuple[date, ...] = ()
 
     def __str__(self) -> str:
         return f"{self.symbol}: {self.kind} — {self.detail}"
@@ -399,11 +402,22 @@ def _check_positive(sym: str, g: pd.DataFrame) -> list[SanityIssue]:
     out: list[SanityIssue] = []
     bad = g[~(pd.to_numeric(g["adj_close"], errors="coerce") > 0)]
     if not bad.empty:
-        out.append(SanityIssue(sym, "adj_close<=0", f"{len(bad)} 行，首个 {bad['date'].iloc[0]}"))
+        out.append(
+            SanityIssue(
+                sym,
+                "adj_close<=0",
+                f"{len(bad)} 行，首个 {bad['date'].iloc[0]}",
+                tuple(bad["date"]),
+            )
+        )
     vol = pd.to_numeric(g["volume"], errors="coerce")
     neg = g[vol.notna() & (vol < 0)]
     if not neg.empty:
-        out.append(SanityIssue(sym, "volume<0", f"{len(neg)} 行，首个 {neg['date'].iloc[0]}"))
+        out.append(
+            SanityIssue(
+                sym, "volume<0", f"{len(neg)} 行，首个 {neg['date'].iloc[0]}", tuple(neg["date"])
+            )
+        )
     return out
 
 
@@ -418,7 +432,14 @@ def _check_ohlc(sym: str, g: pd.DataFrame, src: str) -> list[SanityIssue]:
     bad = usable & ~((lo <= op) & (op <= hi) & (lo <= ref) & (ref <= hi))
     if bool(bad.any()):
         first = g.loc[bad, "date"].iloc[0]
-        return [SanityIssue(sym, "ohlc 不一致", f"{int(bad.sum())} 行，首个 {first}（源 {src}）")]
+        return [
+            SanityIssue(
+                sym,
+                "ohlc 不一致",
+                f"{int(bad.sum())} 行，首个 {first}（源 {src}）",
+                tuple(g.loc[bad, "date"]),
+            )
+        ]
     return []
 
 
@@ -430,14 +451,19 @@ def _check_jumps(sym: str, g: pd.DataFrame, src: str, action_dates: set[date]) -
         return []
     ratio = series / series.shift(1) - 1
     over = ratio.abs() > _MAX_DAILY_MOVE
-    flagged = [d for d, hit in zip(g["date"], over, strict=True) if bool(hit)]
-    flagged = [d for d in flagged if d not in action_dates]
-    if flagged:
+    pairs = [
+        (prev, d)
+        for prev, d, hit in zip(g["date"].shift(1), g["date"], over, strict=True)
+        if bool(hit) and d not in action_dates
+    ]
+    if pairs:
         return [
             SanityIssue(
                 sym,
                 "日间跳变超限",
-                f"{len(flagged)} 行，首个 {flagged[0]}（|Δ| > {_MAX_DAILY_MOVE:.0%}，源 {src}）",
+                f"{len(pairs)} 行，首个 {pairs[0][1]}（|Δ| > {_MAX_DAILY_MOVE:.0%}，源 {src}）",
+                # 跳变说不清是哪一根坏了，所以**一对都要比到**（M15）。
+                tuple(sorted({x for p in pairs for x in p})),
             )
         ]
     return []
@@ -672,6 +698,18 @@ def fetch_window(
             continue
         gap = cross_source_gap(frame[frame["symbol"] == sym], second)
         worst = float(gap["rel_diff"].max()) if not gap.empty else float("nan")
+        # **被标记的那几天必须都比到了**（M15）。`cross_source_gap` 是内连接：
+        # Stooq 有历史、还没有当天（夜里的常态）时，被标记的当天那行在连接里消失，
+        # 只在历史上比出 ≈0 →「备源同意」→ 脏行照写，截止后与次日定稿跑里还是以
+        # 定稿身份写的。没比到的那一天就是「拿不到第二意见」—— 比不出来就不信。
+        # rel_diff 为 NaN（任一侧 adj_close 缺）同样不算比到：max() 会把它跳过。
+        compared = set(gap.loc[gap["rel_diff"].notna(), "date"])
+        # 说不出是哪几天的问题（没填 dates）同样按比不出来办 —— 否则日后新加一条
+        # 检查忘了填，这里会静默退回内连接的老行为。
+        sym_issues = [i for i in issues if i.symbol == sym]
+        flagged = {d for i in sym_issues for d in i.dates}
+        if any(not i.dates for i in sym_issues) or not flagged <= compared:
+            worst = float("nan")
         diffs[sym] = worst
         # NaN 也走这里 —— **比不出来就不信**。
         if not (worst <= _CROSS_SOURCE_TOLERANCE):

@@ -222,7 +222,7 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 
 ## M14 留下的
 
-- **【SERIOUS，pre-existing，建议作为下一个里程碑】第二意见把 Stooq 还没有的那一天当成「一致」。**
+- ~~**【SERIOUS，pre-existing，建议作为下一个里程碑】第二意见把 Stooq 还没有的那一天当成「一致」。**~~ **M15 已还**（`docs/reviews/M15.md`）。以下是当时的描述：
   `cross_source_gap` 按 `(symbol, date)` 内连接；Stooq 有历史、还没有当天（夜里的常态）时，
   被标记的当天那行在连接里消失，`worst` 只在历史上算出 ≈0 → 放行，脏行留在 frame 里。
   闸门 A 第 2 轮用真的 `fetch_window` 复现：当天 close=0.01、Stooq 只给 D0/D1 →
@@ -247,3 +247,16 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
 - 宽限期内「当天日线行内不一致」的那一跑，以前会顺带拿 Stooq 把**整个窗口**比一遍；
   现在不问了。这本来就不是闸门 4 的设计职责（没有当天问题的日子从来不比），所以不算回归，
   但一个**自身没越过 50% 跳变线的**坏历史行，因此少了一次被偶然比出来的机会。
+
+## M15 留下的
+
+- 覆盖不全时 `cross_source_max_diff` 被写成 NaN，日志只剩 `MU=nan%`，分不清是「没比到」还是「真不一致」；
+  应把没比到的日子（`flagged - compared`）带进说明。
+- §7.2 新那条写「前一天与当天」，更准的是「前一天与被标记的那一天」（跳变对可以在窗口任何位置）。
+- 闸门 4 的跳变看 `close`，第二意见比 `adj_close`（pre-existing）：坏的原始 close 配正常的 adj_close 会被
+  「确认」照写；坏的 adj_close（指标用的正是它）配正常的 close 不会被跳变标记。
+- 行内问题（OHLC 不一致、`volume<0`）只要 adj_close 与 Stooq 一致就放行，那一行照写（pre-existing）。
+- `worst` 仍取整窗最大值：历史上 yfinance 与 Stooq 复权口径漂移超过 2% 时，被标记那天完全一致也会被剔除
+  （pre-existing；M15 只收紧覆盖，没收窄比较范围）。
+- 跨 NaN close 的跳变检测不到（比值是 NaN，pre-existing）；yfinance 若给出重复日期，merge 成笛卡尔积。
+- `flagged` 与 `gap["date"]` 靠同一种日期类型才对得上；没有断言守着。类型若变，是**失败即关**（全剔除），不是放行。

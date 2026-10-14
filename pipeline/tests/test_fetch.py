@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from datetime import date, time, timedelta
 from typing import Any
 
@@ -435,6 +437,131 @@ class TestCrossSourceComparison:
         b = pd.DataFrame({"symbol": ["X"], "date": [DAYS[1]], "adj_close": [100.0]})
         assert cross_source_gap(a, b).empty
         assert cross_source_gap(pd.DataFrame(), b).empty
+
+
+class TestIssueDates:
+    """M15：每条问题带上它牵涉的**所有**日子，第二意见要逐一比到。"""
+
+    def _frame(self, source: str, closes: list[float]) -> pd.DataFrame:
+        return TestSanityGate()._frame(source, closes)
+
+    def _only(self, df: pd.DataFrame, kind: str) -> SanityIssue:
+        hits = [i for i in check_sanity(df) if i.kind == kind]
+        assert len(hits) == 1, f"前提：恰好一条 {kind}"
+        return hits[0]
+
+    def test_ohlc_names_the_bad_rows(self) -> None:
+        df = self._frame("yfinance", [100, 101, 102, 103, 104])
+        df.loc[[1, 3], "low"] = 999.0
+        assert self._only(df, "ohlc 不一致").dates == (DAYS[1], DAYS[3])
+
+    def test_non_positive_and_negative_volume_name_their_rows(self) -> None:
+        df = self._frame("yfinance", [100, 101, 102, 103, 104])
+        df.loc[2, "adj_close"] = 0.0
+        df.loc[4, "volume"] = -1
+        assert self._only(df, "adj_close<=0").dates == (DAYS[2],)
+        assert self._only(df, "volume<0").dates == (DAYS[4],)
+
+    def test_a_jump_names_both_sides_of_the_pair(self) -> None:
+        """跳变说不清是哪一根坏了：前一天和被记下的那一天都要比到。"""
+        df = self._frame("yfinance", [100, 101, 102, 103, 0.01])
+        assert self._only(df, "日间跳变超限").dates == (DAYS[3], DAYS[4])
+
+    def test_a_known_split_day_does_not_name_its_pair(self) -> None:
+        df = self._frame("yfinance", [100, 101, 10.2, 10.3, 0.001])
+        issue = self._only(df, "日间跳变超限")
+        assert DAYS[2] in issue.dates, "前提：没有公司行动时拆股日也被记下"
+        out = check_sanity(df, corporate_action_dates={"X": {DAYS[2]}})
+        assert [i.dates for i in out if i.kind == "日间跳变超限"] == [(DAYS[3], DAYS[4])]
+
+
+class TestSecondOpinionMustCoverTheFlaggedDays:
+    """M15：第二意见按内连接比对。Stooq 有历史、还没有当天（夜里的常态）时，
+    被标记的当天那行在连接里消失，只在历史上比出 ≈0 →「备源同意」→ 脏行照写。
+    没比到的那一天就是拿不到第二意见：**比不出来就不信**。"""
+
+    def _stooq_rows(self, closes: Mapping[date, float]) -> str:
+        head = "Date,Open,High,Low,Close,Volume\n"
+        return head + "".join(f"{d},{c},{c},{c},{c},1000\n" for d, c in closes.items())
+
+    def _run(self, yf_closes: list[float | None], stooq_closes: Mapping[date, float]) -> Any:
+        raw = _yf_raw({"AAPL": [100.0] * 5, "MU": yf_closes})
+        csv = self._stooq_rows(stooq_closes)
+        return fetch_window(
+            ["AAPL", "MU"],
+            START,
+            END,
+            _budget(),
+            yf_frame=lambda s, a, b: yfinance_frame(s, a, b, download=lambda *x, **k: raw),
+            stooq=lambda sym, a, b: stooq_frame(sym, a, b, fetch_csv=lambda *x: csv),
+        )
+
+    TRUE = (100.0, 101.0, 102.0, 103.0, 104.0)
+
+    def test_stooq_without_the_flagged_day_is_no_second_opinion(self) -> None:
+        """闸门 A（M14 第 2 轮）的复现：当天 0.01，Stooq 只有前几天。"""
+        hist = dict(zip(DAYS[:4], self.TRUE[:4], strict=True))
+        out = self._run([*self.TRUE[:4], 0.01], hist)
+        assert out.issues, "前提：当天那根真的被标记了"
+        assert out.rejected == ("MU",)
+        assert "MU" not in set(out.frame["symbol"]), "0.01 不能进 T2"
+        assert math.isnan(out.cross_source_max_diff["MU"])
+
+    def test_stooq_without_the_other_side_of_a_jump_is_no_second_opinion(self) -> None:
+        """跳变一对里缺了前一天：说不清是哪根坏了，同样不信。"""
+        days = {d: c for d, c in zip(DAYS, self.TRUE, strict=True) if d != DAYS[1]}
+        out = self._run([100.0, 101.0, 0.01, 103.0, 104.0], {**days, DAYS[2]: 0.01})
+        assert out.rejected == ("MU",)
+
+    def test_a_nan_on_the_flagged_day_is_not_a_comparison(self) -> None:
+        """那天两边都有行，但 Stooq 的价格是 NaN：rel_diff 为 NaN，``max()`` 会把它跳过。
+
+        适配器会丢掉 NaN 行，所以这里绕过适配器直接给 frame —— 要钉的是
+        「NaN 不算比到」这条判断本身，不依赖上游碰巧把它挡住。"""
+
+        def rows(src: str, closes: list[float]) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "symbol": "MU",
+                    "date": DAYS,
+                    "open": float("nan"),
+                    "high": float("nan"),
+                    "low": float("nan"),
+                    "close": closes if src == "yfinance" else None,
+                    "adj_close": closes,
+                    "volume": 1e6,
+                    "source": src,
+                }
+            )
+
+        yf = rows("yfinance", [*self.TRUE[:4], 0.01])
+        stq = rows("stooq", list(self.TRUE))
+        stq.loc[4, "adj_close"] = float("nan")
+        out = fetch_window(
+            ["MU"], START, END, _budget(), yf_frame=lambda *a: yf, stooq=lambda *a: stq
+        )
+        assert out.issues, "前提：当天那根真的被标记了"
+        assert out.rejected == ("MU",)
+
+    def test_a_real_crash_that_stooq_has_is_still_kept(self) -> None:
+        """两个源都有、都说 0.01：那是真跌了，照写。（M15 不改这一支。）"""
+        out = self._run(
+            [*self.TRUE[:4], 0.01], dict(zip(DAYS, [*self.TRUE[:4], 0.01], strict=True))
+        )
+        assert out.rejected == ()
+        assert set(out.frame["symbol"]) == {"AAPL", "MU"}
+
+    def test_an_issue_without_dates_is_not_trusted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """日后新加一条检查忘了填 ``dates``：不能静默退回内连接的老行为。"""
+        import pipeline.fetch as fetch_mod
+
+        monkeypatch.setattr(
+            fetch_mod,
+            "check_sanity",
+            lambda df, **k: [SanityIssue("MU", "新检查", "没填日期")],
+        )
+        out = self._run(list(self.TRUE), dict(zip(DAYS, self.TRUE, strict=True)))
+        assert out.rejected == ("MU",), "两个源完全一致，但说不出比的是哪天"
 
 
 class TestRestrictToSessions:
