@@ -67,7 +67,7 @@ uv run python -m pipeline.check_invariants   # 线上数据库的 22 条不变�
 | 文档 | 说明 | 状态 | 更新 |
 |---|---|---|---|
 | [create-project.md](docs/create-project.md) | 项目建设计划 | v3 + 实现期按实测修正 | 2026-09-21 |
-| [provisional-close.md](docs/provisional-close.md) | 收盘后先出临时结果、次日定稿（M13）；闸门记录 [M13](docs/reviews/M13.md) | 已确认，实现中 | 2026-10-01 |
+| [provisional-close.md](docs/provisional-close.md) | 收盘后先出临时结果、次日定稿（M13）；当天半根日线改走分钟线（M14，§7.3）；闸门记录 [M13](docs/reviews/M13.md)、[M14](docs/reviews/M14.md) | 已确认，实现中 | 2026-10-14 |
 
 ## 为什么站点有一道密码
 
