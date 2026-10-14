@@ -234,6 +234,8 @@ Review 闸门产出的 nice-to-have：**不阻塞当前里程碑，但也不该�
   所以那一跑没有踩到这条。
 - `TestHalfBarEndToEnd._setup` 用 `a[3].sleep` 关节流，依赖 `budget` 是第 4 个位置参数。
 - `_ROW_LOCAL_ISSUES` 与 `check_sanity` 各写一份问题名字面量；改名只有变异测试能抓到。
+- `skills/review-gate/SKILL.md` 说只读沙盒里 `ruff check` / `ruff format --check` 实测跑得了（2026-09-24）；
+  M14 闸门 B（2026-10-13）两者都因 `.ruff_cache` 初始化失败（os error 5）没跑成。表格那一格要改成「时好时坏」。
 
 - `half_bars` 的说明只写标的名，不写被丢那一行的问题原文；若那一天以 `stale_vendor` 收尾，
   这条说明是「一根脏行被丢过」的唯一痕迹。可以把 `SanityIssue` 文本一并带出来。
