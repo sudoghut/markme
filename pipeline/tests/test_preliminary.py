@@ -1273,3 +1273,55 @@ class TestHalfBarEndToEnd:
         assert seen["provisional_day"] is None
         assert report.status == "partial"
         assert report.exit_code == 1
+
+
+class TestSecondOpinionEndToEnd:
+    """M15：Stooq 有历史、还没有当天（夜里的常态）。M14 的端到端测试里 Stooq 桩一律返回空，
+    所以撞不上这条：内连接只比历史 →「备源同意」→ 脏的当天行以**定稿**身份写进库。"""
+
+    def _setup(self, harness: Any) -> tuple[Any, ...]:
+        calls, monkeypatch, rd = harness
+        cfg, symbols, bench = _cfg_symbols()
+        sessions = _sessions(60)
+        today = sessions[-1].date
+        victim = next(s for s in symbols if s != bench)
+        clean = _frame(symbols, [s.date for s in sessions])
+        yf = _half_bar(clean, victim, today)
+        stooq = clean[(clean["symbol"] == victim) & (clean["date"] < today)].assign(
+            source="stooq", close=None
+        )
+        assert not stooq.empty and today not in set(stooq["date"]), "前提：Stooq 有历史、没有当天"
+
+        _install_plan(rd, monkeypatch, sessions, _no_revision())
+
+        def _fw(*a: Any, **k: Any) -> FetchOutcome:
+            a[3].sleep = lambda _s: None
+            return fetch_window(
+                *a,
+                **k,
+                yf_frame=lambda *x: yf,
+                stooq=lambda s, *x: stooq if s == victim else pd.DataFrame(),
+            )
+
+        monkeypatch.setattr(rd, "fetch_window", _fw)
+        return calls, rd, cfg, today, victim
+
+    def _victim_today(self, calls: dict[str, Any], victim: str, today: date) -> list[Any]:
+        return [r for r in _prices_written(calls) if r["symbol"] == victim and r["date"] == today]
+
+    def test_after_the_deadline_the_dirty_row_is_not_written(self, harness: Any) -> None:
+        calls, rd, cfg, today, victim = self._setup(harness)
+        report = rd.run_once(FakeConn(), cfg, now=datetime.combine(today, time(22, 45), tzinfo=ET))
+        assert report.status == "partial"
+        assert self._victim_today(calls, victim, today) == [], "脏行不能以定稿身份写进库"
+        assert "跨源比对未通过" in report.message
+
+    def test_a_finalize_run_does_not_write_it_either(self, harness: Any) -> None:
+        calls, rd, cfg, today, victim = self._setup(harness)
+        harness[1].setattr(rd, "_final_rows", lambda conn, syms, day: 0)
+        report = rd.run_once(
+            FakeConn(), cfg, now=datetime.combine(today + timedelta(days=1), time(9, 0), tzinfo=ET)
+        )
+        assert report.session_date == today
+        assert report.status == "partial"
+        assert self._victim_today(calls, victim, today) == []
