@@ -77,7 +77,7 @@ jobs:
       - name: 带出采样结果
         # **`always()` 是载重的**：超时或被取消时，已经采到的那些行也要带出来。
         if: always() && hashFiles('docs/probe/*.csv') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # run_id + run_attempt 保证不重名；合并时按文件名排序即可。
           name: vendor-probe-${{ github.run_id }}-${{ github.run_attempt }}
