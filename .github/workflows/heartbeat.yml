@@ -107,7 +107,7 @@ jobs:
           N=$("/usr/lib/postgresql/$PGV/bin/pg_restore" --list "/tmp/backup/markme-$(date -u +'%Y-%m').dump" | grep -c 'TABLE DATA')
           echo "dump 里带数据的表：$N"
           [ "$N" -ge 8 ] || { echo "备份不完整：期望 >= 8 张（public 六张 + private 两张），实际 $N"; exit 1; }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.cfg.outputs.have == 'yes'
         with:
           name: pg_dump
