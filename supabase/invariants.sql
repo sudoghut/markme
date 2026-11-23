@@ -143,7 +143,24 @@ from (values
   -- DELETE 只给这三张（§8.1.1）；另三张**不该**有，由上面的否定式断言管。
   ('pipeline_writer', 'strength_daily',      'DELETE'),
   ('pipeline_writer', 'trading_sessions',    'DELETE'),
-  ('pipeline_writer', 'symbol_events',       'DELETE')
+  ('pipeline_writer', 'symbol_events',       'DELETE'),
+  -- 利率板块（0004，M16）。fomc_meetings 走整窗删+插，所以是 DELETE 而不是 UPDATE；
+  -- 另两张只 upsert，**不给 DELETE**（原始事实层）。
+  ('anon',            'rate_policy_daily',   'SELECT'),
+  ('anon',            'treasury_yields',     'SELECT'),
+  ('anon',            'fomc_meetings',       'SELECT'),
+  ('pipeline_writer', 'rate_policy_daily',   'SELECT'),
+  ('pipeline_writer', 'rate_policy_daily',   'INSERT'),
+  ('pipeline_writer', 'rate_policy_daily',   'UPDATE'),
+  ('pipeline_writer', 'treasury_yields',     'SELECT'),
+  ('pipeline_writer', 'treasury_yields',     'INSERT'),
+  ('pipeline_writer', 'treasury_yields',     'UPDATE'),
+  ('pipeline_writer', 'fomc_meetings',       'SELECT'),
+  ('pipeline_writer', 'fomc_meetings',       'INSERT'),
+  ('pipeline_writer', 'fomc_meetings',       'DELETE'),
+  ('pipeline_writer', 'private.macro_fetch_state', 'SELECT'),
+  ('pipeline_writer', 'private.macro_fetch_state', 'INSERT'),
+  ('pipeline_writer', 'private.macro_fetch_state', 'UPDATE')
 ) as t(role, rel, priv)
 where not has_table_privilege(t.role, t.rel, t.priv)
 
@@ -544,3 +561,93 @@ where exists (
       and close is not null
       and close <> adj_close
   );
+
+-- ===========================================================================
+-- C. 利率政策板块（0004，M16；docs/add-rate-policy.md §4.6）
+-- ===========================================================================
+--
+-- 这四条与价格管道的断言**互相独立**：宏观管道是另一个进程、另一个 workflow，
+-- 它的故障不会让上面任何一条变红 —— 所以它需要自己的「沉默探测器」。
+-- （create-project.md §7.2.1：沉默才是最危险的状态。）
+
+-- name: rate_policy_daily 最新一行的 EFFR 必须落在目标区间附近
+--
+-- 防的是**单位错误**（388 或 0.0388，差 100 倍），不是区间内外的细微位置：
+-- 资金面紧张时 EFFR 真的会越出区间（2019-09 就越过上沿），所以容差给到 ±0.5 个百分点。
+-- 表上的 CHECK 只管 (0, 25)，管不到「合法但离谱」。
+select date::text || ' effr=' || effr || ' 区间=' || target_lower || '–' || target_upper
+         as violation
+from rate_policy_daily
+where date = (select max(date) from rate_policy_daily)
+  and (effr < target_lower - 0.5 or effr > target_upper + 0.5);
+
+-- name: rate_policy_daily 的 change_kind / change_bp 必须与目标区间的逐行变化完全一致
+--
+-- 判加息/降息只在管道里做一次、落库，前端只读。所以这里要有一条独立的断言
+-- **从原始区间重新推一遍**：判定逻辑被改坏时，库里会出现「区间没变却标了加息」
+-- 或「区间变了却没标」，而页面会照实播报。
+--   上下沿同向同幅 → up / down，bp = 上沿之差 ×100；
+--   两沿变了但不同向或不同幅 → mixed，bp 为空；
+--   没变，或窗口第一行（没有前值）→ 两列都为空。
+with ordered as (
+  select date, target_lower, target_upper, change_kind, change_bp,
+         lag(target_lower) over (order by date) as pl,
+         lag(target_upper) over (order by date) as pu
+  from rate_policy_daily
+)
+select date::text || ' kind=' || coalesce(change_kind, 'NULL')
+         || ' bp=' || coalesce(change_bp::text, 'NULL') as violation
+from ordered
+where case
+  when pl is null then change_kind is not null or change_bp is not null
+  when target_lower = pl and target_upper = pu then change_kind is not null or change_bp is not null
+  when target_upper - pu = target_lower - pl then
+    change_kind is distinct from (case when target_upper > pu then 'up' else 'down' end)
+    or change_bp is distinct from ((target_upper - pu) * 100)::int
+  else change_kind is distinct from 'mixed' or change_bp is not null
+end;
+
+-- name: 利率数据不得静默停摆 —— 目标区间、收益率、日程都必须在陈旧阈值内
+--
+-- 阈值（7 / 7 / 14 个日历日）**必须与 config/macro.yaml 的 stale_after_days 一致**，
+-- 由 test_invariants.py 的一条测试把两处绑在一起 —— 抄两份必然漂移。
+-- 表是空的也算违规：「宏观管道从没跑过」与「它停了」一样需要有人看一眼。
+select src || ' 最新 ' || coalesce(latest::text, '（无数据）') || '，已超过阈值' as violation
+from (
+  select 'rate_policy_daily' as src, (select max(date) from rate_policy_daily) as latest,
+         current_date - 7 as cutoff
+  union all
+  select 'treasury_yields', (select max(date) from treasury_yields), current_date - 7
+  union all
+  select 'fomc_meetings', (select max(fetched_at)::date from fomc_meetings), current_date - 14
+) t
+where latest is null or latest < cutoff;
+
+-- name: 最新一天的 3 个月期收益率必须与最新 EFFR 在同一个量级
+--
+-- 国债收益率表上只有 (0, 25) 的 CHECK，它拦不住小数形式（0.0432 也在范围内）。
+-- 拿另一个来源的 EFFR 当锚：3 个月国债与 EFFR 同属货币市场利率，历史上相差在 1.5 个百分点
+-- 以内，容差 3 只为拦单位错误（0.0432 对 3.88 差 3.8）。
+-- **容差必须与 pipeline/macro/treasury.py 的 ANCHOR_TOLERANCE 一致**，由测试绑定。
+-- 任一表为空时不报（那是「管道静默停摆」那条的事）。
+select '3m=' || y || ' effr=' || e as violation
+from (
+  select
+    (select yield_pct from treasury_yields where tenor = '3m' order by date desc limit 1) as y,
+    (select effr from rate_policy_daily order by date desc limit 1) as e
+) t
+where y is not null and e is not null and abs(y - e) > 3;
+
+-- name: fomc_meetings 必须有未来会议，且没有重复
+--
+-- 「没有未来会议」会在日程耗尽时变红 —— 这是**想要的**：那时窄条会写「暂无日程」，
+-- 该有人去看一眼页面了；它同时抓住「整窗删+插只删不插」这类写坏的情形。
+-- 重复由整窗删+插保证不出现；出现了就说明删没生效（改期会留下孤儿行，
+-- create-project.md §3.5(1) 的同一个教训）。
+select 'fomc_meetings 里没有任何 end_date >= 今天 的会议' as violation
+where not exists (select 1 from fomc_meetings where end_date >= current_date)
+union all
+select start_date::text || '…' || end_date::text || ' 出现了 ' || count(*) || ' 次'
+from fomc_meetings
+group by start_date, end_date
+having count(*) > 1;

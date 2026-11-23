@@ -1,0 +1,59 @@
+name: macro
+
+# 利率政策板块（docs/add-rate-policy.md，M16）。
+#
+# **与 daily.yml 完全独立**：不同 workflow、不同进程、不同并发组、不写 private.runs。
+# 这个板块是可选的装饰性信息，它的任何故障都不该有办法（哪怕间接地）影响价格管道
+# 的状态码、重试或告警 —— 所以它不挂在 run_daily 里。
+#
+# 两个来源有各自的发布时点：
+#   - 纽约联储在 09:00 ET 发布**前一营业日**的 EFFR / 目标区间；
+#   - 财政部当日收益率曲线在美东下午出齐。
+# 所以一天两跑，**每一跑都是幂等的整窗写**（多跑无害，晚到的数据下一跑自然补上）：
+#
+# ==========  ===========  ===========
+# cron (UTC)  EDT           EST
+# ==========  ===========  ===========
+# ``30 14``   10:30         09:30      纽约联储 09:00 ET 发布之后（含周末，周一取到上周五）
+# ``30 22``   18:30         17:30      财政部当日曲线已出（仅工作日）
+# ==========  ===========  ===========
+#
+# GitHub 的 cron 会迟到（daily.yml 实测过 3 小时级），而这两跑都只是「取最新」，
+# 迟到不改变正确性。
+on:
+  schedule:
+    - cron: "30 14 * * *"
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch: # 首次回填整段历史用
+
+permissions:
+  contents: read
+
+concurrency:
+  group: markme-macro
+  # 不取消正在跑的，排队执行（同 daily.yml）：取消会把数据事务打断在半路。
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - run: uv sync --locked
+
+      - name: 跑利率管道
+        # secret 挂在 **step 级**（§8.3）：checkout 与 uv sync 都不需要它。
+        # 只需要已有的 MARKME_DB_URL —— 三个来源都是公开的，没有 API key。
+        #
+        # 退出码：任一来源失败 → 非零，workflow 变红、发通知。失败的来源**不动库里的
+        # 旧数据**，页面上对应的那一项会标「数据已陈旧」。
+        env:
+          MARKME_DB_URL: ${{ secrets.MARKME_DB_URL }}
+        run: uv run python -m pipeline.run_macro

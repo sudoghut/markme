@@ -51,12 +51,16 @@ __all__ = [
     "diff_prices",
     "finish_run",
     "insert_events",
+    "record_macro_fetch",
+    "replace_fomc_meetings",
     "replace_strength",
     "start_run",
     "sync_symbols",
     "touch_fetch_state",
     "upsert_metrics",
     "upsert_prices",
+    "upsert_rate_policy",
+    "upsert_treasury_yields",
 ]
 
 RunStatus = Literal[
@@ -391,6 +395,86 @@ def touch_fetch_state(conn: psycopg.Connection[Any], symbols: Iterable[str]) -> 
             "on conflict (symbol) do update set last_event_fetch_at = excluded.last_event_fetch_at",
             rows,
         )
+
+
+# ---------------------------------------------------------------------------
+# 利率政策板块（docs/add-rate-policy.md，M16）。写入角色对这三张表的动词见 0004。
+# ---------------------------------------------------------------------------
+RATE_POLICY_WRITE_COLUMNS = (
+    "date",
+    "target_lower",
+    "target_upper",
+    "effr",
+    "change_kind",
+    "change_bp",
+    "source",
+)
+
+TREASURY_WRITE_COLUMNS = ("date", "tenor", "yield_pct")
+
+
+def upsert_rate_policy(conn: psycopg.Connection[Any], rows: Sequence[dict[str, Any]]) -> int:
+    """``rate_policy_daily``：冲突目标 ``date``。**整段历史一起写**，``change_*`` 也一起重写 ——
+    纽约联储会修订历史，只写新行会让旧的 ``change_*`` 停在修订之前。
+    写入角色对这张表没有 DELETE 权限（0004）。"""
+    return _upsert(conn, "rate_policy_daily", RATE_POLICY_WRITE_COLUMNS, ("date",), rows)
+
+
+def upsert_treasury_yields(conn: psycopg.Connection[Any], rows: Sequence[dict[str, Any]]) -> int:
+    """``treasury_yields``：冲突目标 ``(date, tenor)``。同样没有 DELETE 权限。"""
+    return _upsert(conn, "treasury_yields", TREASURY_WRITE_COLUMNS, ("date", "tenor"), rows)
+
+
+def replace_fomc_meetings(
+    conn: psycopg.Connection[Any], coverage_start: date, rows: Sequence[dict[str, Any]]
+) -> int:
+    """``fomc_meetings``：**整窗删+插**，调用方负责放进同一个事务。
+
+    ``coverage_start`` 由日期契约给出，与本次解析出几行无关 —— 改期 / 取消的会议
+    必须消失（美联储 2026-11-12 刚取消了 2027 年 10 月那场的政策决定）。
+    **只在解析与自检通过时调用**：解析失败时整个 delete+insert 都不执行，
+    库里的旧日程原样保留。``coverage_start`` 之前的历史永远不动。
+    """
+    with conn.cursor() as cur:
+        cur.execute("delete from fomc_meetings where end_date >= %s", (coverage_start,))
+    if not rows:
+        return 0
+    cols = ("start_date", "end_date")
+    tuples = _rows_to_tuples(rows, cols)
+    stmt = sql.SQL("insert into fomc_meetings ({cols}) values ({ph})").format(
+        cols=sql.SQL(", ").join(sql.Identifier(c) for c in cols),
+        ph=sql.SQL(", ").join(sql.Placeholder() * len(cols)),
+    )
+    with conn.cursor() as cur:
+        cur.executemany(stmt, tuples)
+    return len(tuples)
+
+
+def record_macro_fetch(conn: psycopg.Connection[Any], source: str, error: str | None) -> None:
+    """记每个来源最近一次尝试的结果，**自己提交**（在数据事务之外）。
+
+    成功：``last_ok_at`` 与 ``last_attempt_at`` 都更新、清空 ``last_error``。
+    失败：只更新 ``last_attempt_at`` 与 ``last_error``，**``last_ok_at`` 保持不动** ——
+    它说的是「数据最后一次是什么时候对的」，一次失败不能把它改掉。
+    """
+    with conn.cursor() as cur:
+        if error is None:
+            cur.execute(
+                "insert into private.macro_fetch_state (source, last_ok_at, last_attempt_at, "
+                "last_error) values (%s, now(), now(), null) "
+                "on conflict (source) do update set last_ok_at = excluded.last_ok_at, "
+                "last_attempt_at = excluded.last_attempt_at, last_error = null",
+                (source,),
+            )
+        else:
+            cur.execute(
+                "insert into private.macro_fetch_state (source, last_ok_at, last_attempt_at, "
+                "last_error) values (%s, null, now(), %s) "
+                "on conflict (source) do update set last_attempt_at = excluded.last_attempt_at, "
+                "last_error = excluded.last_error",
+                (source, _truncate(error)),
+            )
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
