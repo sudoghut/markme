@@ -117,4 +117,13 @@ xfail_strict = true
 # 见 BACKLOG.md：到 M4 引入 yfinance/pandas 之后，若上游的 DeprecationWarning
 # 把测试套弄红，**加定向条目**（"default::DeprecationWarning:yfinance.*"），
 # 不要把这里整体放松成非 error。
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # 上游 pandas_market_calendars（5.4.0 与 5.5.0 都如此）在 nyse.py 的 days_at_time 里
+    # 调用 pandas 3.1 已弃用的 `Series.dt.weekday`。**运行时只是一条警告**，
+    # 红的只有这里的 `error`。定向放行：只认这一条消息，且只认「由 pandas_market_calendars
+    # 的代码触发」的那一次（stacklevel 把归属指到了调用方）。
+    # 我们自己的代码若调用弃用 API，仍然会让测试变红。
+    # 上游修掉之后删掉这一条。
+    "ignore:Series.dt.weekday is deprecated:pandas.errors.Pandas4Warning:pandas_market_calendars",
+]
