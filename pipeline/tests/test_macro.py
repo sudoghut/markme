@@ -481,6 +481,14 @@ class TestConfig:
         assert re.search(pattern, code), "SQL 里的容差必须恰好等于 ANCHOR_TOLERANCE"
         assert f"tenor = '{ANCHOR_TENOR}'" in a.sql  # 字面量在掩码里是 x，所以对原文看
 
+    def test_the_fomc_duplicate_check_looks_at_each_date_on_its_own(self) -> None:
+        """旧行没删掉时往往是「同开始日、不同结束日」—— 按 (start, end) 组合分组查不到它。"""
+        (a,) = [x for x in parse_invariants() if x.name.startswith("fomc_meetings 必须有未来会议")]
+        code = " ".join(mask(a.sql).lower().split())
+        assert "group by start_date having" in code
+        assert "group by end_date having" in code
+        assert "group by start_date, end_date" not in code
+
     def test_the_sql_staleness_thresholds_are_the_configured_ones(self) -> None:
         """SQL 里的 7 / 7 / 14 必须与 macro.yaml 一致 —— 抄两份必然漂移，所以绑在一起。"""
         cfg = load_macro_config()
