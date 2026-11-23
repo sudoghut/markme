@@ -644,10 +644,18 @@ where y is not null and e is not null and abs(y - e) > 3;
 -- 该有人去看一眼页面了；它同时抓住「整窗删+插只删不插」这类写坏的情形。
 -- 重复由整窗删+插保证不出现；出现了就说明删没生效（改期会留下孤儿行，
 -- create-project.md §3.5(1) 的同一个教训）。
+-- **开始日、结束日各查一次，不能按 (start, end) 组合查**：改期后旧行若没删掉，
+-- 往往是「同一个开始日、不同的结束日」，组合键查不到它（codex 审查实测指出）。
+-- 一场会议由开始日唯一确定（解析器也拒收同开始日的页面）。
 select 'fomc_meetings 里没有任何 end_date >= 今天 的会议' as violation
 where not exists (select 1 from fomc_meetings where end_date >= current_date)
 union all
-select start_date::text || '…' || end_date::text || ' 出现了 ' || count(*) || ' 次'
+select 'start_date ' || start_date::text || ' 出现了 ' || count(*) || ' 次' as violation
 from fomc_meetings
-group by start_date, end_date
+group by start_date
+having count(*) > 1
+union all
+select 'end_date ' || end_date::text || ' 出现了 ' || count(*) || ' 次'
+from fomc_meetings
+group by end_date
 having count(*) > 1;
