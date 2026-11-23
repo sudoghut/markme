@@ -68,6 +68,7 @@ uv run python -m pipeline.check_invariants   # 线上数据库的 22 条不变�
 |---|---|---|---|
 | [create-project.md](docs/create-project.md) | 项目建设计划；§7.2 闸门 4 的第二意见必须比到被标记的每一天（M15，闸门记录 [M15](docs/reviews/M15.md)） | v3 + 实现期按实测修正 | 2026-10-14 |
 | [provisional-close.md](docs/provisional-close.md) | 收盘后先出临时结果、次日定稿（M13）；当天半根日线改走分钟线（M14，§7.3）；闸门记录 [M13](docs/reviews/M13.md)、[M14](docs/reviews/M14.md) | 已确认，实现中 | 2026-10-14 |
+| [add-rate-policy.md](docs/add-rate-policy.md) | 利率政策：目标区间、最近一次加息/降息、下次 FOMC、美债收益率（M16；独立管道，不碰 `run_daily`；闸门记录 [M16](docs/reviews/M16.md)） | 已确认，实现中 | 2026-11-23 |
 
 ## 为什么站点有一道密码
 

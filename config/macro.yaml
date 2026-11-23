@@ -1,0 +1,31 @@
+# 利率政策板块的参数（docs/add-rate-policy.md，M16）。
+#
+# 这份配置属于**独立的宏观管道**（pipeline/run_macro.py），与 app.yaml 的价格管道无关。
+# 前端也直接读它（web/lib/config.ts），所以键名改动要两边一起改。
+#
+# 单位：利率一律是**百分数**（4.63 = 4.63%），库里存的和页面展示的是同一个单位。
+# 天数一律是**日历日**。
+
+# 目标区间历史从这天开始整段抓取（1 次请求）。窗口内没有任何变动时，
+# 页面写「自 <这个日期> 起无变动」，不会编一个日期。
+history_start: "2022-01-01"
+
+# 要存的国债期限。`column` 是财政部 CSV 里的列名（必须与官方表头逐字一致，
+# 对不上整次拒收），`key` 是库里的 tenor，`label` 是页面上的短名。
+treasury_tenors:
+  - { column: "3 Mo", key: "3m", label: "3M" }
+  - { column: "2 Yr", key: "2y", label: "2Y" }
+  - { column: "10 Yr", key: "10y", label: "10Y" }
+
+# 数据陈旧阈值（日历日）。超过就在页面上标「数据已陈旧」，
+# 不变式 invariants.sql 里「管道不得静默停摆」用的是同一组数。
+stale_after_days:
+  target_range: 7
+  yields: 7
+  fomc: 14
+
+# 抓取礼仪（沿用价格管道的 RequestBudget）。一跑 4 次请求，上限给 20 是留给重试。
+request_interval_seconds: 2
+max_requests_per_run: 20
+retry_max_attempts: 3
+request_timeout_seconds: 30

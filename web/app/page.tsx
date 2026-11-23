@@ -8,9 +8,11 @@
  */
 import { PoolTable, type Row } from "@/components/PoolTable";
 import { RepoLink } from "@/components/RepoLink";
+import { RatesStrip } from "@/components/RatesStrip";
 import { TopThree } from "@/components/TopThree";
 import { EmptyDatabase, PreliminaryBadge, StaleBanner, failClosed } from "@/components/States";
 import { app, metrics as metricSpecs, strength, universe } from "@/lib/config";
+import { loadRates } from "@/lib/ratesData";
 import { poolColumns } from "@/lib/columns";
 import { parseSort, sortRows } from "@/lib/sort";
 import { MARKET_TZ_LABEL, daysBetween, todayISO } from "@/lib/market";
@@ -66,6 +68,10 @@ export default async function Dashboard({
   // 取一次就固定下来：查询与落后天数必须用**同一个**「今天」，
   // 否则一次跨午夜的渲染会让两者差一天。
   const today = todayISO();
+
+  // 利率窄条（docs/add-rate-policy.md）：**软失败**，永不抛、永不 `failClosed`。
+  // 先发起、最后才 await —— 它与下面的价格读取互不依赖。
+  const ratesPromise = loadRates(R, today);
 
   const symbols = await rest<SymbolRow>("symbols?select=symbol,name,type,enabled&enabled=eq.true&order=symbol", R);
   if (!symbols.ok) failClosed(symbols.reason, symbols.status);
@@ -186,6 +192,8 @@ export default async function Dashboard({
             <PreliminaryBadge show={preliminary} />
           </p>
         </header>
+
+        <RatesStrip status={await ratesPromise} />
 
         <section className="mt-6" aria-labelledby="pool">
           <h2 id="pool" className="sr-only">全池速览</h2>

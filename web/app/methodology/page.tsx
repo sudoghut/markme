@@ -4,7 +4,7 @@
  * 公式清单**从 config 生成** —— §6.1 说前端构建期直读 YAML，
  * 而把公式再手抄一遍就是 §6.1.1 警告的「两个要对齐的地方」。
  */
-import { app, metrics, strength, universe } from "@/lib/config";
+import { app, macro, metrics, strength, universe } from "@/lib/config";
 
 export const revalidate = 3600;
 
@@ -72,6 +72,51 @@ export default function Methodology() {
         α 的 <code>|t| &lt; 2</code> 时会<strong className="text-zinc-300">降透明度</strong> —— 它与 0
         区分不开；悬停可看 <code>t</code> 的具体值。
         一个不显著的 α 在视觉上不该和一个显著的 α 长得一样。
+      </p>
+
+      <h2 id="rates" className="mt-8 scroll-mt-4 text-base font-medium text-zinc-200">利率与政策</h2>
+      <p className="mt-2 text-zinc-400">
+        首页顶部那一条只展示<strong className="text-zinc-300">已发生的事实</strong>：联邦基金目标区间、
+        最近一次加息或降息、下一次 FOMC 会议、{macro.treasury_tenors.map((t) => t.label).join(" / ")} 美债收益率。
+        <strong className="text-zinc-300">不含市场对下次加息 / 降息的预期概率</strong> ——
+        那一类数字没有免费、权威、有 API 的来源，自己用期货反推时口径一错读数就是错的。
+      </p>
+      <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-400">
+        <li>
+          <strong className="text-zinc-300">目标区间与 EFFR</strong> 来自纽约联储的 Markets Data API，
+          同一次请求同时给出两者。<strong className="text-zinc-300">日期是生效日，不是会议日</strong>：
+          FOMC 在会议第二天宣布决议，新区间从<strong className="text-zinc-300">次日</strong>起生效，
+          所以决议当天傍晚窄条仍显示旧区间。
+        </li>
+        <li>
+          <strong className="text-zinc-300">加息 / 降息</strong>由目标区间相对前一天的变化推出：
+          上下沿同向同幅才判方向，否则写「方向未知」，不猜。
+          历史从 {macro.history_start} 起抓取；库里从未记录过变动时写「自（库里最早的数据日期）起无变动」，不编日期；
+          目标区间还没有数据时显示「暂无数据」，不会写成「无变动」。
+        </li>
+        <li>
+          <strong className="text-zinc-300">收益率</strong>来自美国财政部的 Daily Treasury Par Yield Curve，
+          单位是<strong className="text-zinc-300">百分数</strong>（4.63 就是 4.63%），括号里是较前一个有数据的交易日的变动（bp）。
+          2s10s 是 10 年减 2 年，只在两者是同一天的数据时才算。
+        </li>
+        <li>
+          <strong className="text-zinc-300">FOMC 日程</strong>抓自美联储官网，
+          <strong className="text-zinc-300">是暂定的</strong>（官方原话：Each meeting date is tentative），
+          会被改期 —— 美联储在 2026-11-12 刚改过 2027 年的日程。
+          书面表决（notation vote）与没有利率决定的战略会议不算会议，不会出现在倒计时里。
+          日程每天重新抓取、整窗重写，所以改期与取消会如实反映。
+        </li>
+        <li>
+          每一项各自有陈旧标记：目标区间 {macro.stale_after_days.target_range} 天、
+          收益率 {macro.stale_after_days.yields} 天、日程 {macro.stale_after_days.fomc} 天没有成功更新就标
+          「数据已陈旧」。抓取失败时页面显示的是<strong className="text-zinc-300">最后一次成功的结果</strong>，不是空白也不是 0。
+        </li>
+      </ul>
+      <p className="mt-2 text-zinc-400">
+        The Effective Federal Funds Rate and the federal funds target range are subject to the Terms of Use
+        posted at newyorkfed.org. The New York Fed is not responsible for publication of the Effective Federal
+        Funds Rate or the target range by markme, does not sanction or endorse any particular republication,
+        and has no liability for your use.
       </p>
 
       <h2 className="mt-8 text-base font-medium text-zinc-200">表格排序的口径</h2>

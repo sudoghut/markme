@@ -100,6 +100,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      - name: 前端单测（Node 内置 test runner）
+        run: npm test
       - name: next build
         # 构建期会去 config/ 直读 YAML（§6.1），所以不能只编译单个文件。
         # **不给真凭证**：页面必须在数据源不可达时也能构建出「数据暂不可用」

@@ -37,6 +37,13 @@ export type AppConfig = {
   settle_minutes: number;
 };
 
+/** `config/macro.yaml`（利率政策板块，docs/add-rate-policy.md）。键名与 Python 侧的 `MacroConfig` 一一对应。 */
+export type MacroConfig = {
+  history_start: string;
+  treasury_tenors: { column: string; key: string; label: string }[];
+  stale_after_days: { target_range: number; yields: number; fomc: number };
+};
+
 function read<T>(name: string): T {
   return yaml.load(readFileSync(join(CONFIG_DIR, name), "utf8")) as T;
 }
@@ -44,6 +51,7 @@ function read<T>(name: string): T {
 export const app = read<AppConfig>("app.yaml");
 export const universe = read<{ benchmark: string; symbols: { symbol: string; name: string; type: string; enabled: boolean }[] }>("universe.yaml");
 export const strength = read<{ score_metric: string; top_n: number; rank_pool: string; squeak_k?: number }>("strength.yaml");
+export const macro = read<MacroConfig>("macro.yaml");
 const metricsFile = read<{ metrics: MetricSpec[] }>("metrics.yaml");
 
 /** 所有指标（含 derived 展开），按 config 顺序。 */
